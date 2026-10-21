@@ -1577,8 +1577,10 @@ class Players:
                         "r": r["rar"], "w": mask(r["pname"]), "t": int(r["ts"] * 1000)}
             q = "SELECT o.id,o.bname,o.price_cents,o.ts,i.name,i.icon,i.value_cents,i.rar,p.name pname FROM opens o JOIN items i ON i.id=o.item_id JOIN players p ON p.id=o.pid"
             last = [row(r) for r in db.execute(q + " ORDER BY o.id DESC LIMIT 30")]
-            big = [row(r) for r in db.execute(q + " WHERE i.value_cents>=150000 ORDER BY o.id DESC LIMIT 12")]
-            out = {"last": last, "big": big}
+            big = [row(r) for r in db.execute(q + " WHERE i.value_cents>=o.price_cents ORDER BY i.value_cents DESC, o.id DESC LIMIT 12")]
+            bigbox = [row(r) for r in db.execute(q + " WHERE o.price_cents>=10000 ORDER BY o.id DESC LIMIT 30")]
+            lucky = [row(r) for r in db.execute(q + " WHERE i.value_cents>=3*o.price_cents ORDER BY o.id DESC LIMIT 30")]
+            out = {"last": last, "big": big, "bigbox": bigbox, "lucky": lucky}
         finally:
             db.close()
         self._recent = (now, out)

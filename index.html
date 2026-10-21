@@ -1678,13 +1678,12 @@ button,a,select,summary,[role=button]{touch-action:manipulation}
     <div class="wht"><span class="wtag"><i></i>New drops every day</span><h1>Unbox luxury.<br><span>Every box wins.</span></h1><p>Every box drops a real item, from sneakers and watches to gold and supercars, shipped straight to your door.</p><div class="row"><a class="btn" href="#boxes">Open a box<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></a><button class="btn g" id="heroFree">Try a demo spin</button></div><div class="wtr"><span><svg viewBox="0 0 24 24" fill="none" stroke="#c8ff3d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Provably fair</span><span><svg viewBox="0 0 24 24" fill="none" stroke="#c8ff3d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Instant sell-back</span><span><svg viewBox="0 0 24 24" fill="none" stroke="#c8ff3d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg>Ships worldwide</span></div></div>
     <div class="whs" aria-hidden="true"><div class="whf"></div><i class="whsp a"></i><i class="whsp b"></i><img class="whi bar" src="img/h-bar.webp" alt=""><img class="whi bag" src="img/h-bag2.webp" alt=""><img class="whi rm" src="img/h-rm.webp" alt=""><img class="whi car" src="img/h-hypercar.webp" alt=""></div>
   </div>
-  <div class="dr" id="dr" hidden aria-hidden="true"></div>
   <div class="hd"><h2>Hot right now</h2></div>
   <div class="hot" id="hot"></div>
   <div class="hd" id="boxes"><h2>All boxes</h2><div class="chips" id="chips"></div><select id="bsort" aria-label="Sort boxes"><option value="feat">Featured</option><option value="low">Price: low to high</option><option value="high">Price: high to low</option></select></div>
   <input class="q2" id="q2" type="search" placeholder="Search boxes" aria-label="Search boxes">
   <div id="grid"></div>
-  <div class="hd"><h2>Big wins</h2><span class="mut" style="font-size:.85rem">Real players</span></div>
+  <div class="hd"><h2>Biggest wins</h2><span class="mut" style="font-size:.85rem">All time, real players</span></div>
   <div class="bws" id="big"></div>
   <section class="feed" id="feed"><div class="hd"><h2><i class="lvd" aria-hidden="true"></i>Live feed</h2><div class="chips" id="btabs"><button class="chip" data-b="all" aria-pressed="true">Everyone</button><button class="chip" data-b="high" aria-pressed="false">Big boxes</button><button class="chip" data-b="lucky" aria-pressed="false">Lucky wins</button></div></div>
   <p class="hdn">See what other players just opened. These are real openings by real players.</p>
@@ -2103,21 +2102,18 @@ function reveal(rr){FAIR.last={seed:FAIR.seed,cs:FAIR.cs,nonce:FAIR.nonce,roll:r
 
 /* ---------- mood / drops / bets ---------- */
 function setMood(m){clearTimeout(MT);document.querySelectorAll('.wyn').forEach(function(w){w.dataset.m=m});if(m==='win'||m==='sad')MT=setTimeout(function(){setMood('idle')},3800)}
-function addDrop(it,r){var d=document.createElement('div');d.className='d';d.style.setProperty('--c',RC[r]);d.innerHTML='<b>'+ic(it[1])+'</b><span class="dv">$'+fmt(it[2])+'</span><em class="dnm"></em><i class="drr">'+RN[r]+'</i>';d.querySelector('.dnm').textContent=it[0];var c=$('dr');c.prepend(d);while(c.children.length>10)c.lastChild.remove()}
+function addDrop(it,r){var c0=$('dr');if(!c0)return;var d=document.createElement('div');d.className='d';d.style.setProperty('--c',RC[r]);d.innerHTML='<b>'+ic(it[1])+'</b><span class="dv">$'+fmt(it[2])+'</span><em class="dnm"></em><i class="drr">'+RN[r]+'</i>';d.querySelector('.dnm').textContent=it[0];var c=$('dr');c.prepend(d);while(c.children.length>10)c.lastChild.remove()}
 function logBet(){}
 function fake(){}
-var FSEEN={},FFIRST=1,FFIRST0=1;
+var BETH=[],BETL=[];
 function feedLoad(){fetch('/api/recent',{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(j){if(!j)return;
  var bi=function(n){var p=P.find(function(x){return x.n===n||x.on===n});return p},ic0=function(n){var p=bi(n);return p?p.i[p.i.length-1][1]:'box'};
- var L=j.last||[];BETS=L.map(function(r){return{k:ic0(r.box),b:r.box,w:r.w,c:r.price,v:r.v,t:r.t}});
+ var mk=function(L){return(L||[]).map(function(r){return{k:ic0(r.box),b:r.box,w:r.w,c:r.price,v:r.v,t:r.t}})};
+ BETS=mk(j.last);BETH=mk(j.bigbox);BETL=mk(j.lucky);
  BIG=(j.big||[]).map(function(r){return{k:r.k,n:r.name,v:r.v,w:r.w,b:r.box,t:r.t}});
- var nw=L.filter(function(r){return !FSEEN[r.id]}).reverse();nw.forEach(function(r){FSEEN[r.id]=1});
- if(FFIRST){nw=nw.slice(-10);FFIRST=0}else nw=nw.slice(-3);
- nw.forEach(function(r,i){setTimeout(function(){addDrop([r.name,r.k,r.v],Math.max(0,Math.min(4,r.r|0)))},FFIRST0?0:i*450)});FFIRST0=0;
- var d=$('dr');if(d){d.hidden=!d.children.length;d.removeAttribute('aria-hidden')}
  renderBets();renderBig()},function(){})}
 var LBT=0;
-function renderBets(){var rows=BETS.filter(function(b){return BTAB==='all'||(BTAB==='high'&&b.c>=100)||(BTAB==='lucky'&&b.v/b.c>=3)}).slice(0,8);var nw=rows[0]&&rows[0].t!==LBT;LBT=rows[0]?rows[0].t:0;
+function renderBets(){var rows=(BTAB==='high'?BETH:BTAB==='lucky'?BETL:BETS).filter(function(b){return BTAB==='all'||(BTAB==='high'&&b.c>=100)||(BTAB==='lucky'&&b.v/b.c>=3)}).slice(0,12);var nw=rows[0]&&rows[0].t!==LBT;LBT=rows[0]?rows[0].t:0;
  $('bt').innerHTML=rows.length?rows.map(function(b,ri){var m=b.v/b.c,s=Math.max(1,Math.round((Date.now()-b.t)/1000)),ac=m>=10?'#fbbf24':m>=3?'#a97bff':m>=1?'#c8ff3d':'#3a4455';return '<div class="lor'+(ri===0&&nw?' n':'')+'" style="--a:'+ac+'"><span class="lob">'+ic(b.k)+'</span><div class="lot"><b>'+esc(b.w)+'</b> <span>opened</span> <em>'+esc(b.b)+'</em></div>'+(m>=1?'<span class="lom up">'+(m>=10?Math.round(m):m.toFixed(1))+'x win</span>':'<span></span>')+'<b class="lov">$'+fmt(b.v)+'</b><time>'+(s<60?s+'s':Math.round(s/60)+'m')+' ago</time></div>'}).join(''):'<div class="empty">Nothing here yet. Open a box to be the first.</div>';
  document.querySelectorAll('#btabs .chip').forEach(function(c){c.setAttribute('aria-pressed',c.dataset.b===BTAB)})}
 
@@ -2140,7 +2136,7 @@ function dailyLeft(){return Math.max(0,86400000-(Date.now()-S.daily))}
 function renderDaily(){}
 function renderHot(){$('hot').innerHTML=HOTB.map(function(n){var k=P.findIndex(function(p){return (p.on||p.n)===n});return k<0||P[k].off?'':boxHTML(P[k],k)}).join('')}
 function rar(v){return v>=10000?['Legendary','#ffc933']:v>=3000?['Epic','#a97bff']:['Rare','#4fd1ff']}
-function renderBig(){var e=$('big');if(!e)return;var seen={},L=BIG.filter(function(b){if(seen[b.n])return false;seen[b.n]=1;return true}).slice(0,4);e.innerHTML=!L.length?'<div class="empty">No big wins yet. The biggest prizes from real players will show here.</div>':L.map(function(b,j){var bp=P.find(function(p){return p.n===b.b||p.on===b.b})||P[0],r=rar(b.v),x=bp.p?b.v/bp.p:1,tm=b.t||(b.t=Date.now()-(j*97+43)*1000);return '<div class="bw" style="--r:'+r[1]+'"><div class="bwb">'+(bp.img?'<img src="'+bp.img+'" alt="" loading="lazy">':'')+'</div><span class="bwr">'+r[0]+'</span><span class="bwx">'+(x>=10?Math.round(x):x.toFixed(1))+'x</span><div class="bwi">'+ic(b.k)+'</div><b class="bwn">'+esc(b.n)+'</b><div class="bwv">$'+fmt(b.v)+'</div><div class="bwf"><i class="av">'+esc(b.w.charAt(0).toUpperCase())+'</i><span><b>'+esc(b.w)+'</b>from '+esc(b.b)+'</span><time>'+ago(tm)+'</time></div></div>'}).join('')}
+function renderBig(){var e=$('big');if(!e)return;var L=BIG.slice(0,8);e.innerHTML=!L.length?'<div class="empty">No big wins yet. The biggest prizes from real players will show here.</div>':L.map(function(b,j){var bp=P.find(function(p){return p.n===b.b||p.on===b.b})||P[0],r=rar(b.v),x=bp.p?b.v/bp.p:1,tm=b.t||(b.t=Date.now()-(j*97+43)*1000);return '<div class="bw" style="--r:'+r[1]+'"><div class="bwb">'+(bp.img?'<img src="'+bp.img+'" alt="" loading="lazy">':'')+'</div><span class="bwr">'+r[0]+'</span><span class="bwx">'+(x>=10?Math.round(x):x.toFixed(1))+'x</span><div class="bwi">'+ic(b.k)+'</div><b class="bwn">'+esc(b.n)+'</b><div class="bwv">$'+fmt(b.v)+'</div><div class="bwf"><i class="av">'+esc(b.w.charAt(0).toUpperCase())+'</i><span><b>'+esc(b.w)+'</b>from '+esc(b.b)+'</span><time>'+ago(tm)+'</time></div></div>'}).join('')}
 function renderHome(){$('chips').innerHTML=CATS.map(function(c){return '<button class="chip" data-c="'+c+'" aria-pressed="'+(c===S.cat)+'">'+c+'</button>'}).join('');$('grid').innerHTML=gridHTML();$('bsort').value=S.bs||'feat';renderHot();renderDaily();renderBets();renderBig()}
 function refresh(){renderTop();renderHome();if(S.view==='account')renderAcc();if(S.view==='upgrade')renderUp();renderSide();renderBN();save()}
 
