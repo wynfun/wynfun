@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /wallet-admin.html
+
+Sitemap: https://wyn.fun/sitemap.xml
