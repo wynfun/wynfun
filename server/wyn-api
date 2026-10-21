@@ -84,7 +84,7 @@ def mail_conf():
     c = read_json(MAIL_FILE, None)
     return c if isinstance(c, dict) and c.get("api_key") and c.get("from") else None
 
-def send_mail(to, subject, text):
+def send_mail(to, subject, text, html=None):
     """Sends one email through Resend. Never raises; returns (ok, message)."""
     c = mail_conf()
     if not c:
@@ -92,7 +92,7 @@ def send_mail(to, subject, text):
     try:
         req = urllib.request.Request(
             MAIL_URL,
-            data=json.dumps({"from": c["from"], "to": [to], "subject": subject, "text": text}).encode(),
+            data=json.dumps(dict({"from": c["from"], "to": [to], "subject": subject, "text": text}, **({"html": html} if html else {}))).encode(),
             headers={"Authorization": "Bearer " + c["api_key"], "Content-Type": "application/json", "User-Agent": "wyn-api/1.0"},
             method="POST")
         with urllib.request.urlopen(req, timeout=12) as r:
@@ -106,12 +106,51 @@ def send_mail(to, subject, text):
     except Exception as e:
         return False, str(e)[:200]
 
-def send_async(to, subject, text):
+def send_async(to, subject, text, html=None):
     def run():
-        ok, msg = send_mail(to, subject, text)
+        ok, msg = send_mail(to, subject, text, html)
         if not ok:
             sys.stderr.write("mail to a player failed: %s\n" % msg)
     threading.Thread(target=run, daemon=True).start()
+
+def esc_html(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+def email_html(title, paragraphs, button=None, small=None):
+    """One simple, good-looking layout for every email (works in Gmail, Outlook and phones)."""
+    body = "".join('<p style="margin:0 0 16px;font-size:16px;line-height:1.55;color:#d6dbe6">%s</p>' % p for p in paragraphs)
+    btn = ""
+    if button:
+        btn = ('<table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 22px"><tr><td style="border-radius:12px;background:#c8ff3d">'
+               '<a href="%s" style="display:inline-block;padding:14px 26px;font-size:16px;font-weight:800;color:#0b0e13;text-decoration:none;border-radius:12px">%s</a></td></tr></table>' % (esc_html(button[1]), esc_html(button[0])))
+        body += btn + '<p style="margin:0 0 16px;font-size:13px;line-height:1.5;color:#8b97a8">Button not working? Copy this link into your browser:<br><a href="%s" style="color:#c8ff3d;word-break:break-all">%s</a></p>' % (esc_html(button[1]), esc_html(button[1]))
+    if small:
+        body += '<p style="margin:0;font-size:13px;line-height:1.5;color:#8b97a8">%s</p>' % small
+    return ('<!doctype html><html><body style="margin:0;padding:0;background:#0b0e13">'
+            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="background:#0b0e13"><tr><td align="center" style="padding:28px 14px">'
+            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#141a24;border:1px solid #263041;border-radius:20px">'
+            '<tr><td style="padding:28px 28px 8px;font-family:Arial,Helvetica,sans-serif"><div style="font-size:24px;font-weight:900;letter-spacing:-.5px;color:#ffffff">wyn<span style="color:#c8ff3d">.</span>fun</div></td></tr>'
+            '<tr><td style="padding:8px 28px 28px;font-family:Arial,Helvetica,sans-serif"><h1 style="margin:14px 0 14px;font-size:26px;line-height:1.2;color:#ffffff">%s</h1>%s</td></tr></table>'
+            '<p style="margin:16px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#6b7686">wyn.fun is a demo. Balances and items are virtual and have no cash value.</p>'
+            '</td></tr></table></body></html>') % (esc_html(title), body)
+
+def welcome_mail(name, url):
+    text = ("Hi %s,\n\nWelcome to wyn.fun! Your account is ready.\n\nOpen your first box: %s\n\nwyn.fun is a demo for now: balances and items are virtual and have no cash value.\n\nwyn.fun" % (name, url))
+    html = email_html("Welcome, %s!" % name,
+                      ["Your wyn.fun account is ready. Pick a box, see every prize and its odds, and open it when you feel lucky.",
+                       "You start with a demo balance, so you can try everything for free."],
+                      ("Open your first box", url),
+                      "You are getting this email because an account was created with this address.")
+    return text, html
+
+def reset_mail(name, link):
+    text = ("Hi %s,\n\nSomeone (hopefully you) asked to reset your wyn.fun password.\nOpen this link to choose a new one. It works once and expires in 1 hour:\n\n%s\n\nIf you did not ask for this, you can ignore this email. Your password stays the same.\n\nwyn.fun" % (name, link))
+    html = email_html("Reset your password",
+                      ["Hi %s," % esc_html(name), "Someone (hopefully you) asked to reset your wyn.fun password. Tap the button to choose a new one."],
+                      ("Choose a new password", link),
+                      "The link works once and expires in 1 hour. If you did not ask for this, you can ignore this email. Your password stays the same.")
+    return text, html
+
 
 def base_url(env):
     c = mail_conf() or {}
@@ -660,7 +699,8 @@ class H(BaseHTTPRequestHandler):
             tok = app.players.new_session(pid)
             p = app.players.session_player(tok)
             if mail_conf():
-                send_async(p["email"], "Welcome to wyn.fun", "Hi %s,\n\nYour wyn.fun account is ready. Have fun opening boxes!\n\nwyn.fun is a demo for now: balances and items are virtual and have no cash value.\n\nwyn.fun" % p["name"])
+                txt, html = welcome_mail(p["name"], base_url(app.env))
+                send_async(p["email"], "Welcome to wyn.fun", txt, html)
             return self.send(200, {"ok": True, "user": app.players.public(p)}, self.set_pcookie(tok, PSESSION_MAX))
         if self.path == "/api/login":
             ip = self.ip()
@@ -687,8 +727,8 @@ class H(BaseHTTPRequestHandler):
             r = app.players.make_reset(email) if EMAIL_RE.match(email) else None
             if r:
                 link = "%s/?reset=%s" % (base_url(app.env), r[1])
-                send_async(email, "Reset your wyn.fun password",
-                           "Hi %s,\n\nSomeone (hopefully you) asked to reset your wyn.fun password.\nOpen this link to choose a new one. It works once and expires in 1 hour:\n\n%s\n\nIf you did not ask for this, you can ignore this email. Your password stays the same.\n\nwyn.fun" % (r[0], link))
+                txt, html = reset_mail(r[0], link)
+                send_async(email, "Reset your wyn.fun password", txt, html)
             return self.send(200, {"ok": True, "mail": True})
         if self.path == "/api/reset":
             if not app.players.reset_lim.hit(self.ip()):
@@ -802,7 +842,7 @@ def mail_setup():
         pass
     to = input("Send a test email to which address (leave empty to skip): ").strip()
     if to:
-        ok, msg = send_mail(to, "wyn.fun test email", "If you can read this, wyn.fun can send emails.")
+        ok, msg = send_mail(to, "wyn.fun test email", "If you can read this, wyn.fun can send emails.", email_html("It works!", ["If you can read this, wyn.fun can send emails."], ("Open wyn.fun", base_url("live"))))
         print("\nTest email:", "SENT. Check your inbox (and spam)." if ok else "FAILED: " + msg)
         if not ok:
             print("Tip: Resend only sends from a domain you verified. Check the DNS records in Resend.")
