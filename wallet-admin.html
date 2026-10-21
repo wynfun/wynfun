@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Wallet admin - wyn.fun</title>
+<style>
+:root{--bg:#0b0e13;--p1:#151a22;--p2:#1b2230;--line:#263041;--ink:#eef2f8;--mut:#8b97a8;--acc:#8b5cff;--acc2:#c8ff3d;--red:#ff6b6b;--grn:#3ddc97;--amb:#ffc247}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:0 0 60px}
+.wrap{max-width:920px;margin:0 auto;padding:16px max(16px,env(safe-area-inset-left))}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 0 6px}
+header h1{margin:0;font-size:1.4rem;flex:1;min-width:160px}header h1 span{color:var(--mut);font-weight:500;font-size:.9rem}
+a.btn,button.btn{display:inline-block;border:0;border-radius:11px;padding:10px 16px;font:inherit;font-weight:700;cursor:pointer;background:var(--acc2);color:#0b0e13;text-decoration:none}
+.btn.o{background:none;border:1px solid var(--line);color:var(--ink)}.btn.r{background:var(--red);color:#1a0b0b}.btn.s{padding:7px 12px;font-size:.88rem}.btn:disabled{opacity:.5;cursor:default}
+.panel{background:var(--p1);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:14px}
+.panel h2{margin:0 0 10px;font-size:1.05rem}.mut{color:var(--mut)}.small{font-size:.85rem}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.stat{background:var(--p2);border-radius:12px;padding:12px}.stat small{display:block;color:var(--mut)}.stat b{font-size:1.3rem}
+.ok{color:var(--grn)}.bad{color:var(--red)}.warn{color:var(--amb)}
+.card{background:var(--p2);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:10px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.row>*{min-width:0}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;word-break:break-all;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:6px 8px;display:block;margin-top:4px}
+input,select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit;max-width:100%}
+input:focus,select:focus{outline:0;border-color:var(--acc2)}
+label.sw{display:flex;align-items:center;gap:10px;margin:8px 0;cursor:pointer}label.sw input{width:20px;height:20px;accent-color:var(--acc2)}
+.tag{display:inline-block;border-radius:99px;padding:2px 10px;font-size:.78rem;font-weight:700;background:var(--p1);border:1px solid var(--line)}
+.tag.pending{color:var(--amb)}.tag.approved,.tag.paid{color:var(--grn)}.tag.rejected{color:var(--red)}
+.coin{display:grid;grid-template-columns:auto 1fr;gap:8px 10px;align-items:center;border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+.coin .f{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}.coin .f label{font-size:.78rem;color:var(--mut)}.coin .f input,.coin .f select{width:100%;margin-top:3px}
+.msg{margin-top:10px;min-height:1.3em}
+#login{text-align:center;padding:50px 10px}
+table{width:100%;border-collapse:collapse;font-size:.88rem}td,th{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600}
+.tw{overflow-x:auto}
+</style></head><body><div class="wrap">
+<header><h1>Wallet <span id="env"></span></h1><a class="btn o" href="/#admin">Back to admin</a><button class="btn o" id="reload" type="button">Refresh</button></header>
+<div id="login" hidden><h2>Please sign in first</h2><p class="mut">Open the admin sign-in, then come back to this page.</p><a class="btn" href="/#admin">Admin sign in</a></div>
+<div id="app" hidden></div></div>
+<script>
+(function(){
+function h(t,a,k){var e=document.createElement(t);if(a)for(var x in a){if(x==='class')e.className=a[x];else if(x==='text')e.textContent=a[x];else if(x.slice(0,2)==='on')e[x]=a[x];else e.setAttribute(x,a[x])}(k||[]).forEach(function(c){if(c==null)return;e.appendChild(typeof c==='string'?document.createTextNode(c):c)});return e}
+function usd(c){return '$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+function when(t){return new Date(t*1000).toLocaleString()}
+function J(m,u,b){return fetch(u,{method:m,credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){j.status=r.status;return j})})}
+function copy(t,btn){try{navigator.clipboard.writeText(t).then(function(){var o=btn.textContent;btn.textContent='Copied';setTimeout(function(){btn.textContent=o},1200)},function(){})}catch(e){}}
+var D=null,app=document.getElementById('app'),CO=[];
+var PRESETS=[['usdt-trc20','USDT','TRC20','tron'],['usdt-erc20','USDT','ERC20','evm'],['usdt-bep20','USDT','BEP20','evm'],['usdc-erc20','USDC','ERC20','evm'],['btc','Bitcoin','Bitcoin','btc'],['eth','Ethereum','ERC20','evm'],['sol','Solana','Solana','sol']];
+function load(){J('GET','/api/admin/wallet').then(function(j){if(j.status===401){app.hidden=true;document.getElementById('login').hidden=false;return}document.getElementById('login').hidden=true;app.hidden=false;D=j;CO=JSON.parse(JSON.stringify(j.settings.coins||[]));render()})}
+function say(el,t,bad){el.textContent=t;el.className='msg '+(bad?'bad':'ok')}
+function render(){app.innerHTML='';var s=D.settings;
+ var st=h('div',{class:'panel'},[h('h2',{text:'Overview'}),h('div',{class:'stats'},[
+  h('div',{class:'stat'},[h('small',{text:'Players hold (real)'}),h('b',{text:usd(D.held_cents)})]),
+  h('div',{class:'stat'},[h('small',{text:'Players with a balance'}),h('b',{text:String(D.holders)})]),
+  h('div',{class:'stat'},[h('small',{text:'Waiting for you'}),h('b',{text:String(D.deposits.filter(function(x){return x.status==='pending'}).length+D.withdrawals.filter(function(x){return x.status==='pending'}).length)})]),
+  h('div',{class:'stat'},[h('small',{text:'Ledger check'}),h('b',{class:D.mismatch.length?'bad':'ok',text:D.mismatch.length?D.mismatch.length+' mismatch':'All balances match'})])])]);
+ app.appendChild(st);
+ // switches
+ var m1=h('div',{class:'msg'});
+ var cd=h('input',{type:'checkbox'}),cw=h('input',{type:'checkbox'});cd.checked=!!s.real_deposits;cw.checked=!!s.real_withdrawals;
+ var md=h('input',{type:'number',min:'1',step:'1',value:s.min_deposit,style:'width:110px'}),mw=h('input',{type:'number',min:'1',step:'1',value:s.min_withdraw,style:'width:110px'});
+ var coinBox=h('div');
+ function drawCoins(){coinBox.innerHTML='';CO.forEach(function(c,i){
+  var f=function(k,l,t){var inp=h('input',{type:t||'text',value:c[k]||''});inp.oninput=function(){c[k]=inp.value};return h('label',{},[l,inp])};
+  var sel=h('select',{},[['tron','Tron (T...)'],['evm','Ethereum / BNB (0x...)'],['btc','Bitcoin'],['sol','Solana'],['other','Other']].map(function(o){return h('option',{value:o[0],text:o[1]})}));sel.value=c.addr_type||'other';sel.onchange=function(){c.addr_type=sel.value};
+  var en=h('input',{type:'checkbox'});en.checked=!!c.enabled;en.onchange=function(){c.enabled=en.checked};
+  coinBox.appendChild(h('div',{class:'coin'},[h('label',{class:'sw',style:'margin:0'},[en,h('b',{text:'On'})]),h('div',{class:'f'},[f('label','Name'),f('network','Network'),f('id','Short id (no spaces)'),h('label',{},['Address type',sel]),h('label',{style:'grid-column:1/-1'},['Your receiving address',(function(){var a=h('input',{value:c.address||'',autocomplete:'off',spellcheck:'false'});a.oninput=function(){c.address=a.value.trim()};return a})()])]),
+   h('span'),h('button',{class:'btn o s',type:'button',text:'Remove',onclick:function(){CO.splice(i,1);drawCoins()}})]))})}
+ drawCoins();
+ var pre=h('div',{class:'row',style:'margin-top:8px'},PRESETS.map(function(p){return h('button',{class:'btn o s',type:'button',text:'+ '+p[1]+' '+p[2],onclick:function(){if(CO.some(function(c){return c.id===p[0]}))return;CO.push({id:p[0],label:p[1],network:p[2],address:'',addr_type:p[3],enabled:false});drawCoins()}})}));
+ var sv=h('button',{class:'btn',type:'button',text:'Save settings',onclick:function(){sv.disabled=true;J('POST','/api/admin/wallet/settings',{real_deposits:cd.checked,real_withdrawals:cw.checked,min_deposit:md.value,min_withdraw:mw.value,coins:CO}).then(function(j){sv.disabled=false;if(j.ok){D=j.wallet;CO=JSON.parse(JSON.stringify(D.settings.coins||[]));say(m1,'Saved.');setTimeout(render,700)}else say(m1,j.error||'Could not save.',1)})}});
+ app.appendChild(h('div',{class:'panel'},[h('h2',{text:'Settings'}),
+  h('p',{class:'warn small',text:'Keep real deposits OFF until every game result is decided on the server and you have checked the legal rules. Players cannot spend real funds yet.'}),
+  h('label',{class:'sw'},[cd,h('span',{text:'Real deposits are open'})]),h('label',{class:'sw'},[cw,h('span',{text:'Real withdrawals are open'})]),
+  h('div',{class:'row'},[h('label',{class:'small mut'},['Smallest deposit ($) ',md]),h('label',{class:'small mut'},['Smallest withdrawal ($) ',mw])]),
+  h('h2',{text:'Your receiving addresses',style:'margin-top:16px'}),h('p',{class:'mut small',text:'Players see these addresses when they deposit. Double check every character. Changing an address is saved in the audit log.'}),coinBox,pre,h('div',{class:'row',style:'margin-top:14px'},[sv]),m1]));
+ // pending deposits
+ var pd=D.deposits.filter(function(x){return x.status==='pending'});
+ var pdp=h('div',{class:'panel'},[h('h2',{text:'Deposits waiting for you ('+pd.length+')'})]);
+ if(!pd.length)pdp.appendChild(h('p',{class:'mut',text:'Nothing waiting.'}));
+ pd.forEach(function(d){var am=h('input',{type:'number',step:'0.01',min:'0.01',value:(d.claimed_cents/100).toFixed(2),style:'width:130px'}),nt=h('input',{placeholder:'Note (optional)',style:'flex:1;min-width:150px'}),mm=h('div',{class:'msg'});
+  pdp.appendChild(h('div',{class:'card'},[h('div',{class:'row'},[h('b',{text:d.name}),h('span',{class:'mut',text:d.email}),h('span',{class:'mut small',text:when(d.created)})]),
+   h('div',{text:'Says they sent '+usd(d.claimed_cents)+' in '+d.coin+(d.network?' ('+d.network+')':'')}),
+   h('div',{class:'small mut',text:'Transaction hash. Look it up on the blockchain, confirm it reached YOUR address with the right amount:'}),h('span',{class:'mono',text:d.txid}),
+   h('div',{class:'row',style:'margin-top:10px'},[h('button',{class:'btn o s',type:'button',text:'Copy hash',onclick:function(e){copy(d.txid,e.target)}}),h('label',{class:'small mut'},['Credit ($) ',am]),nt]),
+   h('div',{class:'row',style:'margin-top:10px'},[h('button',{class:'btn s',type:'button',text:'Approve and credit',onclick:function(e){if(!confirm('Credit '+usd(Math.round(parseFloat(am.value||0)*100))+' to '+d.name+'?'))return;e.target.disabled=true;J('POST','/api/admin/wallet/deposit',{id:d.id,action:'approve',amount:am.value,note:nt.value}).then(function(j){if(j.ok){D=j.wallet;render()}else{e.target.disabled=false;say(mm,j.error||'Failed',1)}})}}),
+    h('button',{class:'btn r s',type:'button',text:'Reject',onclick:function(e){if(!confirm('Reject this deposit?'))return;J('POST','/api/admin/wallet/deposit',{id:d.id,action:'reject',note:nt.value}).then(function(j){if(j.ok){D=j.wallet;render()}else say(mm,j.error||'Failed',1)})}})]),mm]))});
+ app.appendChild(pdp);
+ // pending withdrawals
+ var pw=D.withdrawals.filter(function(x){return x.status==='pending'});
+ var pwp=h('div',{class:'panel'},[h('h2',{text:'Withdrawals waiting for you ('+pw.length+')'})]);
+ if(!pw.length)pwp.appendChild(h('p',{class:'mut',text:'Nothing waiting.'}));
+ pw.forEach(function(w){var tx=h('input',{placeholder:'Your payout transaction hash',style:'flex:1;min-width:200px'}),nt=h('input',{placeholder:'Note to player (optional)',style:'flex:1;min-width:150px'}),mm=h('div',{class:'msg'});
+  pwp.appendChild(h('div',{class:'card'},[h('div',{class:'row'},[h('b',{text:w.name}),h('span',{class:'mut',text:w.email}),h('span',{class:'mut small',text:when(w.created)})]),
+   h('div',{text:'Wants '+usd(w.cents)+' paid in '+w.coin+(w.network?' ('+w.network+')':'')}),h('span',{class:'mono',text:w.address}),
+   h('div',{class:'row',style:'margin-top:10px'},[h('button',{class:'btn o s',type:'button',text:'Copy address',onclick:function(e){copy(w.address,e.target)}}),tx,nt]),
+   h('div',{class:'row',style:'margin-top:10px'},[h('button',{class:'btn s',type:'button',text:'Mark as paid',onclick:function(e){e.target.disabled=true;J('POST','/api/admin/wallet/withdrawal',{id:w.id,action:'paid',txid:tx.value,note:nt.value}).then(function(j){if(j.ok){D=j.wallet;render()}else{e.target.disabled=false;say(mm,j.error||'Failed',1)}})}}),
+    h('button',{class:'btn r s',type:'button',text:'Reject and refund',onclick:function(e){if(!confirm('Reject and give '+usd(w.cents)+' back to the player?'))return;J('POST','/api/admin/wallet/withdrawal',{id:w.id,action:'reject',note:nt.value}).then(function(j){if(j.ok){D=j.wallet;render()}else say(mm,j.error||'Failed',1)})}})]),mm]))});
+ app.appendChild(pwp);
+ // adjust
+ var ae=h('input',{type:'email',placeholder:'player@email.com',style:'flex:1;min-width:180px'}),aa=h('input',{type:'text',placeholder:'+25 or -10',inputmode:'decimal',style:'width:110px'}),an=h('input',{placeholder:'Reason (required)',style:'flex:2;min-width:180px'}),am2=h('div',{class:'msg'});
+ app.appendChild(h('div',{class:'panel'},[h('h2',{text:'Manual correction'}),h('p',{class:'mut small',text:'Add or remove balance for a player, for example a refund or a fix. Always saved with your reason.'}),
+  h('div',{class:'row'},[ae,aa,an,h('button',{class:'btn s',type:'button',text:'Apply',onclick:function(e){if(!confirm('Apply '+aa.value+' to '+ae.value+'?'))return;J('POST','/api/admin/wallet/adjust',{email:ae.value,amount:aa.value,note:an.value}).then(function(j){if(j.ok){D=j.wallet;render()}else say(am2,j.error||'Failed',1)})}})]),am2]));
+ // history
+ function hist(title,rows,cols){var t=h('table',{},[h('tr',{},cols.map(function(c){return h('th',{text:c[0]})}))].concat(rows.map(function(r){return h('tr',{},cols.map(function(c){var v=c[1](r);return h('td',{},[v instanceof Node?v:document.createTextNode(String(v))])}))})));return h('div',{class:'panel'},[h('h2',{text:title}),rows.length?h('div',{class:'tw'},[t]):h('p',{class:'mut',text:'Nothing yet.'})])}
+ var tg=function(s){return h('span',{class:'tag '+s,text:s})};
+ app.appendChild(hist('Deposit history',D.deposits.filter(function(x){return x.status!=='pending'}),[['When',function(r){return when(r.created)}],['Player',function(r){return r.email}],['Coin',function(r){return r.coin}],['Claimed',function(r){return usd(r.claimed_cents)}],['Credited',function(r){return r.credited_cents==null?'-':usd(r.credited_cents)}],['Status',function(r){return tg(r.status)}]]));
+ app.appendChild(hist('Withdrawal history',D.withdrawals.filter(function(x){return x.status!=='pending'}),[['When',function(r){return when(r.created)}],['Player',function(r){return r.email}],['Coin',function(r){return r.coin}],['Amount',function(r){return usd(r.cents)}],['Status',function(r){return tg(r.status)}]]));
+ app.appendChild(hist('Audit log (latest)',D.audit,[['When',function(r){return when(r.ts)}],['Who',function(r){return r.who}],['What',function(r){return r.action}],['Details',function(r){return r.detail}]]));
+ if(D.mismatch.length)app.insertBefore(h('div',{class:'panel'},[h('h2',{class:'bad',text:'Balances that do not match the ledger'}),h('div',{class:'tw'},[h('table',{},D.mismatch.map(function(m){return h('tr',{},[h('td',{text:m.email}),h('td',{text:'balance '+usd(m.real_cents)}),h('td',{text:'ledger '+usd(m.ledger)})])}))])]),app.children[1]);
+}
+document.getElementById('reload').onclick=load;load();
+})();
+</script></body></html>
