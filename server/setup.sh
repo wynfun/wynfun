@@ -43,6 +43,7 @@ HASH="$(caddy hash-password --plaintext "$PW1")"
 unset PW1 PW2
 sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__HASH__|$HASH|g" "$SRC/Caddyfile.tpl" > /etc/caddy/Caddyfile
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+mkdir -p /var/log/caddy; chown -R caddy:caddy /var/log/caddy
 systemctl enable caddy >/dev/null 2>&1
 systemctl restart caddy
 
