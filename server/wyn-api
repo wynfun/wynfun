@@ -1452,6 +1452,29 @@ class Players:
         return {"name": p["name"], "email": p["email"], "created": p["created"],
                 "state": json.loads(p["state"]) if p["state"] else None, "ver": p["ver"]}
 
+    def recent(self):
+        """Public, anonymous list of the latest real box openings (names are partly hidden)."""
+        now = time.time()
+        c = getattr(self, "_recent", None)
+        if c and now - c[0] < 4:
+            return c[1]
+        db = self.db()
+        try:
+            def mask(n):
+                n = str(n or "player")
+                return n[:2] + "***"
+            def row(r):
+                return {"id": r["id"], "box": r["bname"], "price": r["price_cents"] / 100.0, "name": r["name"], "k": r["icon"], "v": r["value_cents"] / 100.0,
+                        "r": r["rar"], "w": mask(r["pname"]), "t": int(r["ts"] * 1000)}
+            q = "SELECT o.id,o.bname,o.price_cents,o.ts,i.name,i.icon,i.value_cents,i.rar,p.name pname FROM opens o JOIN items i ON i.id=o.item_id JOIN players p ON p.id=o.pid"
+            last = [row(r) for r in db.execute(q + " ORDER BY o.id DESC LIMIT 30")]
+            big = [row(r) for r in db.execute(q + " WHERE i.value_cents>=150000 ORDER BY o.id DESC LIMIT 12")]
+            out = {"last": last, "big": big}
+        finally:
+            db.close()
+        self._recent = (now, out)
+        return out
+
     def admin_data(self):
         """Real players, payments, orders and per-box totals for the main admin dashboard."""
         db = self.db()
@@ -1669,6 +1692,8 @@ class H(BaseHTTPRequestHandler):
         app = self.server.app
         if self.path == "/api/admin/me":
             return self.send(200, {"ok": app.check_session(self.cookie_val())})
+        if self.path == "/api/recent":
+            return self.send(200, app.players.recent())
         if self.path == "/api/health":
             return self.send(200, {"ok": True, "env": app.env})
         if self.path == "/api/me":

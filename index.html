@@ -1657,10 +1657,10 @@ button,a,select,summary,[role=button]{touch-action:manipulation}
   <div class="hd" id="boxes"><h2>All boxes</h2><div class="chips" id="chips"></div><select id="bsort" aria-label="Sort boxes"><option value="feat">Featured</option><option value="low">Price: low to high</option><option value="high">Price: high to low</option></select></div>
   <input class="q2" id="q2" type="search" placeholder="Search boxes" aria-label="Search boxes">
   <div id="grid"></div>
-  <div class="hd"><h2>Big wins</h2><span class="mut" style="font-size:.85rem">Simulated players</span></div>
+  <div class="hd"><h2>Big wins</h2><span class="mut" style="font-size:.85rem">Real players</span></div>
   <div class="bws" id="big"></div>
   <section class="feed" id="feed"><div class="hd"><h2><i class="lvd" aria-hidden="true"></i>Live feed</h2><div class="chips" id="btabs"><button class="chip" data-b="all" aria-pressed="true">Everyone</button><button class="chip" data-b="high" aria-pressed="false">Big boxes</button><button class="chip" data-b="lucky" aria-pressed="false">Lucky wins</button></div></div>
-  <p class="hdn">See what other players just opened. Players and opens are simulated.</p>
+  <p class="hdn">See what other players just opened. These are real openings, with player names partly hidden.</p>
   <div class="lo" id="bt"></div></section>
   <section class="hw" id="how"><div class="hd"><h2>How it works</h2></div>
    <div class="steps"><div class="st"><div class="sti" id="hi0"></div><b>Pick a box</b><span class="t">Browse by theme and price. Every item and its odds are shown before you spend anything.</span></div><div class="st"><div class="sti" id="hi1"></div><b>Open it</b><span class="t">Watch the reel land on a result that was already fixed before you pressed open.</span></div><div class="st"><div class="sti" id="hi2"></div><b>Sell or ship it</b><span class="t">Cash out instantly, or keep the item and have it shipped to you.</span></div></div></section>
@@ -2076,8 +2076,18 @@ function reveal(rr){FAIR.last={seed:FAIR.seed,cs:FAIR.cs,nonce:FAIR.nonce,roll:r
 /* ---------- mood / drops / bets ---------- */
 function setMood(m){clearTimeout(MT);document.querySelectorAll('.wyn').forEach(function(w){w.dataset.m=m});if(m==='win'||m==='sad')MT=setTimeout(function(){setMood('idle')},3800)}
 function addDrop(it,r){var d=document.createElement('div');d.className='d';d.style.setProperty('--c',RC[r]);d.innerHTML='<b>'+ic(it[1])+'</b><span class="dv">$'+fmt(it[2])+'</span><em class="dnm"></em><i class="drr">'+RN[r]+'</i>';d.querySelector('.dnm').textContent=it[0];var c=$('dr');c.prepend(d);while(c.children.length>10)c.lastChild.remove()}
-function logBet(p,q,who){var it=p.i[q];BETS.unshift({k:p.i[p.i.length-1][1],b:p.n,w:who,c:p.p,v:it[2],t:Date.now()-(who==='You'?0:Math.floor(Math.random()*40000))});if(BETS.length>16)BETS.pop();if(it[2]>=1500){BIG.unshift({k:it[1],n:it[0],v:it[2],w:who,b:p.n});if(BIG.length>8)BIG.pop()}}
-function fake(){var p=P[Math.floor(Math.random()*P.length)],q=pickRand(p);addDrop(p.i[q],TR(p,q));logBet(p,q,NM[Math.floor(Math.random()*NM.length)]+Math.floor(Math.random()*90+10));renderBets();renderBig()}
+function logBet(){}
+function fake(){}
+var FSEEN={},FFIRST=1;
+function feedLoad(){fetch('/api/recent',{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(j){if(!j)return;
+ var bi=function(n){var p=P.find(function(x){return x.n===n||x.on===n});return p},ic0=function(n){var p=bi(n);return p?p.i[p.i.length-1][1]:'box'};
+ var L=j.last||[];BETS=L.map(function(r){return{k:ic0(r.box),b:r.box,w:r.w,c:r.price,v:r.v,t:r.t}});
+ BIG=(j.big||[]).map(function(r){return{k:r.k,n:r.name,v:r.v,w:r.w,b:r.box,t:r.t}});
+ var nw=L.filter(function(r){return !FSEEN[r.id]}).reverse();nw.forEach(function(r){FSEEN[r.id]=1});
+ if(FFIRST){nw=nw.slice(-10);FFIRST=0}else nw=nw.slice(-3);
+ nw.forEach(function(r){addDrop([r.name,r.k,r.v],Math.max(0,Math.min(4,r.r|0)))});
+ var d=$('dr');if(d){d.hidden=!d.children.length;d.removeAttribute('aria-hidden')}
+ renderBets();renderBig()},function(){})}
 var LBT=0;
 function renderBets(){var rows=BETS.filter(function(b){return BTAB==='all'||(BTAB==='high'&&b.c>=100)||(BTAB==='lucky'&&b.v/b.c>=3)}).slice(0,8);var nw=rows[0]&&rows[0].t!==LBT;LBT=rows[0]?rows[0].t:0;
  $('bt').innerHTML=rows.length?rows.map(function(b,ri){var m=b.v/b.c,s=Math.max(1,Math.round((Date.now()-b.t)/1000)),ac=m>=10?'#fbbf24':m>=3?'#a97bff':m>=1?'#c8ff3d':'#3a4455';return '<div class="lor'+(ri===0&&nw?' n':'')+'" style="--a:'+ac+'"><span class="lob">'+ic(b.k)+'</span><div class="lot"><b>'+esc(b.w)+'</b> <span>opened</span> <em>'+esc(b.b)+'</em></div>'+(m>=1?'<span class="lom up">'+(m>=10?Math.round(m):m.toFixed(1))+'x win</span>':'<span></span>')+'<b class="lov">$'+fmt(b.v)+'</b><time>'+(s<60?s+'s':Math.round(s/60)+'m')+' ago</time></div>'}).join(''):'<div class="empty">Nothing here yet. Open a box to be the first.</div>';
@@ -2102,7 +2112,7 @@ function dailyLeft(){return Math.max(0,86400000-(Date.now()-S.daily))}
 function renderDaily(){}
 function renderHot(){$('hot').innerHTML=HOTB.map(function(n){var k=P.findIndex(function(p){return (p.on||p.n)===n});return k<0||P[k].off?'':boxHTML(P[k],k)}).join('')}
 function rar(v){return v>=10000?['Legendary','#ffc933']:v>=3000?['Epic','#a97bff']:['Rare','#4fd1ff']}
-function renderBig(){var e=$('big');if(!e)return;var seen={},L=BIG.filter(function(b){if(seen[b.n])return false;seen[b.n]=1;return true}).slice(0,4);e.innerHTML=L.map(function(b,j){var bp=P.find(function(p){return p.n===b.b})||P[0],r=rar(b.v),x=bp.p?b.v/bp.p:1,tm=b.t||(b.t=Date.now()-(j*97+43)*1000);return '<div class="bw" style="--r:'+r[1]+'"><div class="bwb">'+(bp.img?'<img src="'+bp.img+'" alt="" loading="lazy">':'')+'</div><span class="bwr">'+r[0]+'</span><span class="bwx">'+(x>=10?Math.round(x):x.toFixed(1))+'x</span><div class="bwi">'+ic(b.k)+'</div><b class="bwn">'+esc(b.n)+'</b><div class="bwv">$'+fmt(b.v)+'</div><div class="bwf"><i class="av">'+esc(b.w.charAt(0).toUpperCase())+'</i><span><b>'+esc(b.w)+'</b>from '+esc(b.b)+'</span><time>'+ago(tm)+'</time></div></div>'}).join('')}
+function renderBig(){var e=$('big');if(!e)return;var seen={},L=BIG.filter(function(b){if(seen[b.n])return false;seen[b.n]=1;return true}).slice(0,4);e.innerHTML=!L.length?'<div class="empty">No big wins yet. The biggest prizes from real players will show here.</div>':L.map(function(b,j){var bp=P.find(function(p){return p.n===b.b||p.on===b.b})||P[0],r=rar(b.v),x=bp.p?b.v/bp.p:1,tm=b.t||(b.t=Date.now()-(j*97+43)*1000);return '<div class="bw" style="--r:'+r[1]+'"><div class="bwb">'+(bp.img?'<img src="'+bp.img+'" alt="" loading="lazy">':'')+'</div><span class="bwr">'+r[0]+'</span><span class="bwx">'+(x>=10?Math.round(x):x.toFixed(1))+'x</span><div class="bwi">'+ic(b.k)+'</div><b class="bwn">'+esc(b.n)+'</b><div class="bwv">$'+fmt(b.v)+'</div><div class="bwf"><i class="av">'+esc(b.w.charAt(0).toUpperCase())+'</i><span><b>'+esc(b.w)+'</b>from '+esc(b.b)+'</span><time>'+ago(tm)+'</time></div></div>'}).join('')}
 function renderHome(){$('chips').innerHTML=CATS.map(function(c){return '<button class="chip" data-c="'+c+'" aria-pressed="'+(c===S.cat)+'">'+c+'</button>'}).join('');$('grid').innerHTML=gridHTML();$('bsort').value=S.bs||'feat';renderHot();renderDaily();renderBets();renderBig()}
 function refresh(){renderTop();renderHome();if(S.view==='account')renderAcc();if(S.view==='upgrade')renderUp();renderSide();renderBN();save()}
 
@@ -2158,7 +2168,7 @@ async function spin(free){
  (function f(){if(done)return;var m=new DOMMatrix(getComputedStyle(st).transform).m41,i=Math.floor((-m+rw/2)/step);if(i!==last){last=i;Snd.tick(Math.min(1,Math.max(0,-m/tx)))}curve(st,m,step,cw,rw);requestAnimationFrame(f)})();
  setTimeout(function(){
   done=true;var tw=TR(p,w),it=p.i[w],h='<div class="rv r'+tw+'" style="--c:'+RC[tw]+'"><div class="rays"></div><i class="spk s1"></i><i class="spk s2"></i><i class="spk s3"></i><i class="spk s4"></i><div class="rvcard"><span class="rb">'+RN[tw]+'</span><div class="rvi">'+ic(it[1])+'</div><div class="rvt"><div class="rvn">'+it[0]+'</div><div class="rvv">$<span id="cnt">'+fmt(it[2])+'</span></div><div class="rvx">'+(it[2]>=p.p?'<b>$'+fmt(it[2]-p.p)+' more than the box cost</b>':'Worth '+Math.round(it[2]/p.p*100)+'% of the $'+fmt(p.p)+' box price')+'</div></div></div></div>';st.children[W].classList.add('win');st.classList.add('done');curve(st,new DOMMatrix(getComputedStyle(st).transform).m41,step,cw,rw);if(tw>=2&&!red)burst(RC[tw],tw>=4?70:tw>=3?46:24);
-  if(!free){var id=srv?srv.item.id:giveItem({n:it[0],k:it[1],v:it[2],r:tw},p.n);addDrop(it,tw);logBet(p,w,'You');if(!srv)log('open','Opened '+p.n+': '+it[0],-p.p);h+='<div class="wb2"><button class="wbp" data-q="'+id+'"><b>Sell for $'+fmt(it[2])+'</b><small>Cash goes straight to your balance</small></button><button class="wbs" data-act="keep"><b>Keep item</b><small>Save it in your items</small></button><button class="wbg" data-act="again"><b>Open again</b><small>$'+fmt(p.p)+' per box</small></button></div>';if(srv){FAIR.srv=1;FAIR.commit=srv.fair.commit;FAIR.cs=srv.fair.cs;FAIR.nonce=srv.fair.nonce;FAIR.last=srv.fair.last;fairUI();if(window.walletPull)walletPull()}else reveal(rr)}
+  if(!free){var id=srv?srv.item.id:giveItem({n:it[0],k:it[1],v:it[2],r:tw},p.n);if(srv)setTimeout(feedLoad,700);if(!srv)log('open','Opened '+p.n+': '+it[0],-p.p);h+='<div class="wb2"><button class="wbp" data-q="'+id+'"><b>Sell for $'+fmt(it[2])+'</b><small>Cash goes straight to your balance</small></button><button class="wbs" data-act="keep"><b>Keep item</b><small>Save it in your items</small></button><button class="wbg" data-act="again"><b>Open again</b><small>$'+fmt(p.p)+' per box</small></button></div>';if(srv){FAIR.srv=1;FAIR.commit=srv.fair.commit;FAIR.cs=srv.fair.cs;FAIR.nonce=srv.fair.nonce;FAIR.last=srv.fair.last;fairUI();if(window.walletPull)walletPull()}else reveal(rr)}
   if(free)h+='<div class="wb2 two"><button class="wbg" data-act="again"><b>Open for real</b><small>$'+fmt(p.p)+' per box</small></button><button class="wbs" data-act="again-free"><b>Spin again</b><small>Free demo, nothing kept</small></button></div><div class="wnote">This was a demo spin. Nothing was kept.</div>';$('res').innerHTML=h;$('mc').classList.add('won');countUp(it[2]);setTimeout(function(){var w=document.querySelector('#res .wb2');if(w&&w.scrollIntoView)w.scrollIntoView({block:'nearest',behavior:'auto'})},150);Snd.land();Snd.win(tw);setMood(tw>=3?'win':tw===0?'sad':'idle');S.busy=false;setBtns(false);$('spin').textContent='Open again for $'+fmt(p.p);refresh();
  },dur*1000+150)}
 
@@ -4273,9 +4283,8 @@ function wwConf(n,big){var st=document.querySelector('.wwstage');if(!st||(window
 /* ---------- init ---------- */
 var hi=['box','gem','wallet'];hi.forEach(function(k,j){$('hi'+j).innerHTML=ic(k)});
 resetBattle();
-for(var z=0;z<9;z++)fake();setInterval(fake,2600);
+feedLoad();setInterval(feedLoad,6000);
 
-var sp=0;while(BIG.length<10&&sp++<400){var bp=P[Math.floor(Math.random()*P.length)],bq=bp.i.length-2+(Math.random()<.35?1:0),bi=bp.i[bq];if(bi[2]>=1500)BIG.push({k:bi[1],n:bi[0],v:bi[2],w:NM[Math.floor(Math.random()*NM.length)]+Math.floor(Math.random()*90+10),b:bp.n})}
 
 $('hot').addEventListener('pointermove',function(e){var b=e.target.closest('.box');if(!b)return;var r=b.getBoundingClientRect(),x=(e.clientX-r.left)/r.width-.5,y=(e.clientY-r.top)/r.height-.5;b.style.transform='perspective(700px) rotateX('+(-y*14)+'deg) rotateY('+(x*14)+'deg) translateY(-6px)'});
 $('hot').addEventListener('pointerout',function(e){var b=e.target.closest('.box');if(b&&!b.contains(e.relatedTarget))b.style.transform=''});
