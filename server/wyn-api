@@ -8,7 +8,7 @@ Players: sign up / log in / saved game state (sqlite file per site).
 Admin login = username + password + 6-digit code from an authenticator app.
 Passwords are stored only as a salted scrypt hash. Nothing secret is in GitHub.
 """
-import base64, getpass, hashlib, hmac, json, os, re, secrets, shutil, sqlite3, struct, subprocess, sys, threading, time
+import base64, getpass, math, hashlib, hmac, json, os, re, secrets, shutil, sqlite3, struct, subprocess, sys, threading, time
 import urllib.request, urllib.error
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -224,12 +224,20 @@ class Limiter:
         self.d.pop(key, None)
 
 
+class GameErr(Exception):
+    pass
+
+
 class Players:
     def __init__(self, folder, env="live"):
         self.env = env
         self.box_file = os.environ.get("WYN_BOXES") or os.path.join(os.environ.get("WYN_SITE_BASE", "/srv/wynfun"), env, "data", "boxes.json")
         self._boxes = {"mt": None, "d": {}}
         self.open_lim = Limiter(60, 60)
+        self.game_lim = Limiter(150, 60)
+        self.crash_poll = Limiter(900, 60)
+        self.games_file = os.environ.get("WYN_GAMES") or os.path.join(os.environ.get("WYN_SITE_BASE", "/srv/wynfun"), env, "data", "games.json")
+        self._games = {"mt": None, "d": {}}
         self.path = os.path.join(folder, "players.sqlite")
         self.signup_lim = Limiter(5, 3600)
         self.login_ip = Limiter(10, 900)
@@ -266,6 +274,10 @@ class Players:
         CREATE INDEX IF NOT EXISTS it_pid ON items(pid, status, id);
         CREATE TABLE IF NOT EXISTS opens(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, bname TEXT NOT NULL, price_cents INTEGER NOT NULL, item_idx INTEGER NOT NULL, item_id INTEGER NOT NULL, roll REAL NOT NULL, nonce INTEGER NOT NULL, ts REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS op_pid ON opens(pid, id);
+        CREATE TABLE IF NOT EXISTS fair_g(pid INTEGER NOT NULL, game TEXT NOT NULL, seed TEXT NOT NULL, cs TEXT NOT NULL, nonce INTEGER NOT NULL DEFAULT 0, last TEXT, PRIMARY KEY(pid, game));
+        CREATE TABLE IF NOT EXISTS rounds(pid INTEGER NOT NULL, game TEXT NOT NULL, st TEXT NOT NULL, PRIMARY KEY(pid, game));
+        CREATE TABLE IF NOT EXISTS plays(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, game TEXT NOT NULL, bet_cents INTEGER NOT NULL, pay_cents INTEGER NOT NULL, mult REAL, ts REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS pl_pid ON plays(pid, id);
         INSERT OR IGNORE INTO meta(k,v) VALUES('chatseq',0);
         CREATE TABLE IF NOT EXISTS chat_threads(pid INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'ai', ru INTEGER NOT NULL DEFAULT 0, ra INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0, upd REAL);
         CREATE TABLE IF NOT EXISTS chat_msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, f TEXT NOT NULL, t REAL NOT NULL, x TEXT NOT NULL, extra TEXT);
@@ -778,6 +790,441 @@ class Players:
         finally:
             db.close()
 
+    # ---------- games: the server decides every result ----------
+    CR_WAIT = 2.4   # seconds between the bet and take-off (the countdown on screen)
+
+    def games(self):
+        try:
+            mt = os.path.getmtime(self.games_file)
+        except OSError:
+            return self._games["d"]
+        if mt != self._games["mt"]:
+            self._games = {"mt": mt, "d": json.load(open(self.games_file))}
+        return self._games["d"]
+
+    def _run(self, fn):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                out = fn(db)
+            except GameErr as e:
+                db.execute("ROLLBACK")
+                return None, str(e)
+            db.execute("COMMIT")
+            return out, None
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+
+    def _gf(self, db, pid, game):
+        r = db.execute("SELECT * FROM fair_g WHERE pid=? AND game=?", (pid, game)).fetchone()
+        if not r:
+            db.execute("INSERT INTO fair_g(pid,game,seed,cs,nonce) VALUES(?,?,?,?,0)", (pid, game, secrets.token_hex(16), "wyn-" + secrets.token_hex(4)))
+            r = db.execute("SELECT * FROM fair_g WHERE pid=? AND game=?", (pid, game)).fetchone()
+        return r
+
+    @staticmethod
+    def _gf_out(r):
+        return {"commit": hashlib.sha256(r["seed"].encode()).hexdigest(), "cs": r["cs"], "nonce": r["nonce"], "last": json.loads(r["last"]) if r["last"] else None}
+
+    def _gf_roll(self, db, pid, game, extra):
+        """Reveals the seed used for this round, picks a fresh one for the next. Returns (used, new fair row)."""
+        f = self._gf(db, pid, game)
+        used = {"seed": f["seed"], "cs": f["cs"], "nonce": f["nonce"], "commit": hashlib.sha256(f["seed"].encode()).hexdigest()}
+        used.update(extra)
+        db.execute("UPDATE fair_g SET seed=?, nonce=nonce+1, last=? WHERE pid=? AND game=?", (secrets.token_hex(16), json.dumps(used), pid, game))
+        return used, self._gf(db, pid, game)
+
+    def game_fair(self, pid, game):
+        if game not in ("plinko", "wheel", "gem", "crash", "battle", "upgrade"):
+            return None, "Unknown game."
+        return self._run(lambda db: self._gf_out(self._gf(db, pid, game)))
+
+    @staticmethod
+    def _pay(bet_cents, mult):
+        return int((Decimal(bet_cents) * Decimal(repr(float(mult)))).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+    def _bet(self, v):
+        c = self.cents(v, 100, 500000)
+        if c is None:
+            raise GameErr("Please enter a bet from $1 to $5,000.")
+        return c
+
+    def _stake(self, db, pid, cents, note):
+        try:
+            self._post(db, pid, "bet", -cents, "G", note)
+        except ValueError:
+            raise GameErr("Not enough funds for that bet. Add funds or lower it.")
+
+    def _win(self, db, pid, game, bet, pay, mult, note):
+        if pay > 0:
+            self._post(db, pid, "win", pay, "G", note)
+        db.execute("INSERT INTO plays(pid,game,bet_cents,pay_cents,mult,ts) VALUES(?,?,?,?,?,?)", (pid, game, bet, pay, mult, time.time()))
+
+    def plinko_drop(self, pid, bet, rows, risk):
+        tb = self.games().get("plinko", {})
+        rows = str(rows)
+        if rows not in tb or risk not in tb[rows]:
+            return None, "Choose rows and risk again."
+        n = int(rows)
+        def go(db):
+            b = self._bet(bet)
+            f = self._gf(db, pid, "plinko")
+            h = hashlib.sha256(("%s:%s:%d" % (f["seed"], f["cs"], f["nonce"])).encode()).hexdigest()
+            path = [int(h[i * 2:i * 2 + 2], 16) & 1 for i in range(n)]
+            k = sum(path)
+            mult = tb[rows][risk][k]
+            pay = self._pay(b, mult)
+            self._stake(db, pid, b, "Wyn Drop bet")
+            self._win(db, pid, "plinko", b, pay, mult, "Wyn Drop %gx" % mult)
+            used, f2 = self._gf_roll(db, pid, "plinko", {"rows": n, "risk": risk, "slot": k, "mult": mult})
+            return {"ok": True, "path": path, "slot": k, "mult": mult, "bet_cents": b, "payout_cents": pay, "fair": self._gf_out(f2)}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def wheel_spin(self, pid, bet, n, risk):
+        tb = self.games().get("wheel", {})
+        n = str(n)
+        if n not in tb or risk not in tb[n]:
+            return None, "Choose the slots and risk again."
+        vals = tb[n][risk]
+        def go(db):
+            b = self._bet(bet)
+            f = self._gf(db, pid, "wheel")
+            h = hashlib.sha256(("%s:%s:%d" % (f["seed"], f["cs"], f["nonce"])).encode()).hexdigest()
+            idx = int(h[:8], 16) % int(n)
+            mult = vals[idx]
+            pay = self._pay(b, mult)
+            self._stake(db, pid, b, "Wyn Wheel bet")
+            self._win(db, pid, "wheel", b, pay, mult, "Wyn Wheel %gx" % mult)
+            used, f2 = self._gf_roll(db, pid, "wheel", {"n": int(n), "risk": risk, "idx": idx, "mult": mult})
+            return {"ok": True, "idx": idx, "mult": mult, "bet_cents": b, "payout_cents": pay, "fair": self._gf_out(f2)}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    # ----- Gem Hunt -----
+    @staticmethod
+    def _gem_shuffle(seed, cs, nonce):
+        by = []
+        for i in range(4):
+            h = hashlib.sha256(("%s:%s:%d:%d" % (seed, cs, nonce, i)).encode()).hexdigest()
+            by += [int(h[j:j + 2], 16) for j in range(0, len(h), 2)]
+        a = list(range(25))
+        p = 0
+        for i in range(24, 0, -1):
+            lim = (256 // (i + 1)) * (i + 1)
+            b = by[p % len(by)]
+            p += 1
+            while b >= lim and p < len(by):
+                b = by[p]
+                p += 1
+            j = b % (i + 1)
+            a[i], a[j] = a[j], a[i]
+        return a
+
+    def _gem_end(self, db, pid, st, win):
+        tb = self.games()["gem"][str(st["mines"])]
+        k = len(st["picked"])
+        mult = tb[k] if win and k > 0 else 0
+        pay = self._pay(st["bet"], mult) if mult else 0
+        f = self._gf(db, pid, "gem")
+        bombs = self._gem_shuffle(f["seed"], f["cs"], f["nonce"])[:st["mines"]]
+        self._win(db, pid, "gem", st["bet"], pay, mult, "Gem Hunt " + ("cash out %.2fx" % mult if win else "bomb"))
+        used, f2 = self._gf_roll(db, pid, "gem", {"mines": st["mines"], "bombs": bombs, "picked": st["picked"], "mult": mult})
+        db.execute("DELETE FROM rounds WHERE pid=? AND game='gem'", (pid,))
+        return {"done": True, "win": bool(win), "mult": mult, "payout_cents": pay, "bombs": bombs, "fair": self._gf_out(f2)}
+
+    def _gem_round(self, db, pid):
+        r = db.execute("SELECT st FROM rounds WHERE pid=? AND game='gem'", (pid,)).fetchone()
+        return json.loads(r["st"]) if r else None
+
+    def gem_start(self, pid, bet, mines):
+        tb = self.games().get("gem", {})
+        try:
+            m = int(mines)
+        except (TypeError, ValueError):
+            m = 0
+        if str(m) not in tb:
+            return None, "Choose how many bombs you want."
+        def go(db):
+            if self._gem_round(db, pid):
+                raise GameErr("You already have a game in progress.")
+            b = self._bet(bet)
+            f = self._gf(db, pid, "gem")
+            self._stake(db, pid, b, "Gem Hunt bet")
+            st = {"bet": b, "mines": m, "picked": []}
+            db.execute("INSERT OR REPLACE INTO rounds(pid,game,st) VALUES(?,?,?)", (pid, "gem", json.dumps(st)))
+            return {"ok": True, "bet_cents": b, "mines": m, "fair": {"commit": self._gf_out(f)["commit"], "cs": f["cs"], "nonce": f["nonce"]}}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def gem_pick(self, pid, i):
+        try:
+            i = int(i)
+        except (TypeError, ValueError):
+            i = -1
+        if not 0 <= i < 25:
+            return None, "Pick a tile on the board."
+        def go(db):
+            st = self._gem_round(db, pid)
+            if not st:
+                raise GameErr("No game in progress.")
+            if i in st["picked"]:
+                raise GameErr("That tile is already open.")
+            f = self._gf(db, pid, "gem")
+            bombs = self._gem_shuffle(f["seed"], f["cs"], f["nonce"])[:st["mines"]]
+            if i in bombs:
+                st["picked"].append(i)
+                out = self._gem_end(db, pid, dict(st, picked=st["picked"][:-1]), False)
+                out.update({"bomb": True, "i": i})
+                return out
+            st["picked"].append(i)
+            k = len(st["picked"])
+            tb = self.games()["gem"][str(st["mines"])]
+            if k >= 25 - st["mines"]:
+                out = self._gem_end(db, pid, st, True)
+                out.update({"bomb": False, "i": i, "k": k})
+                return out
+            db.execute("UPDATE rounds SET st=? WHERE pid=? AND game='gem'", (json.dumps(st), pid))
+            return {"done": False, "bomb": False, "i": i, "k": k, "mult": tb[k]}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def gem_cash(self, pid):
+        def go(db):
+            st = self._gem_round(db, pid)
+            if not st or not st["picked"]:
+                raise GameErr("Open at least one tile before cashing out.")
+            return self._gem_end(db, pid, st, True)
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def gem_leave(self, pid):
+        """Player walked away: cash out if they have gems, otherwise give the bet back."""
+        def go(db):
+            st = self._gem_round(db, pid)
+            if not st:
+                return {"done": True, "none": True}
+            if st["picked"]:
+                return self._gem_end(db, pid, st, True)
+            self._post(db, pid, "refund", st["bet"], "G", "Gem Hunt bet returned")
+            db.execute("DELETE FROM rounds WHERE pid=? AND game='gem'", (pid,))
+            return {"done": True, "refund": True}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def gem_state(self, pid):
+        db = self.db()
+        try:
+            r = db.execute("SELECT st FROM rounds WHERE pid=? AND game='gem'", (pid,)).fetchone()
+            if not r:
+                return {"active": False}
+            st = json.loads(r["st"])
+            tb = self.games()["gem"][str(st["mines"])]
+            return {"active": True, "bet_cents": st["bet"], "mines": st["mines"], "picked": st["picked"], "mult": tb[len(st["picked"])]}
+        finally:
+            db.close()
+
+    # ----- Crash (Flying Roadster) -----
+    @staticmethod
+    def _crash_point(h, cfg):
+        r = int(h[:13], 16) / (2 ** 52)
+        if r < cfg["edge"]:
+            return 1.0
+        c = math.floor((1 - cfg["edge"]) / (1 - r) * 100) / 100
+        return float(min(cfg["max"], max(1, c)))
+
+    def _crash_round(self, db, pid):
+        r = db.execute("SELECT st FROM rounds WHERE pid=? AND game='crash'", (pid,)).fetchone()
+        return json.loads(r["st"]) if r else None
+
+    def _crash_finish(self, db, pid, st, mult):
+        cfg = self.games()["crash"]
+        pay = self._pay(st["bet"], mult) if mult else 0
+        self._win(db, pid, "crash", st["bet"], pay, mult or 0, "Flying Roadster " + ("win (%.2fx)" % mult if mult else "crashed"))
+        used, f2 = self._gf_roll(db, pid, "crash", {"cp": st["cp"], "cashed": mult or 0})
+        db.execute("DELETE FROM rounds WHERE pid=? AND game='crash'", (pid,))
+        return {"done": True, "cp": st["cp"], "cashed": mult or 0, "payout_cents": pay, "fair": self._gf_out(f2)}
+
+    def _crash_resolve(self, db, pid, st, now, want_cash):
+        """Decides what has happened by `now`. Returns a result dict if the round is over, or None if still flying."""
+        cfg = self.games()["crash"]
+        rate = cfg["rate"]
+        t = now - st["t0"]
+        cp = st["cp"]
+        tcrash = (math.log(cp) / rate) if cp > 1 else 0.0
+        auto = st.get("auto") or 0
+        # automatic eject comes first if the roadster reaches it before crashing
+        if auto and auto < cp:
+            tauto = math.log(auto) / rate
+            if t >= tauto:
+                return self._crash_finish(db, pid, st, auto)
+        if t >= tcrash:
+            return self._crash_finish(db, pid, st, 0)
+        if want_cash:
+            if t < 0:
+                raise GameErr("Wait for take-off.")
+            m = math.floor(math.exp(rate * t) * 100) / 100
+            m = max(1.0, m)
+            return self._crash_finish(db, pid, st, m)
+        return None
+
+    def crash_start(self, pid, bet, auto):
+        cfg = self.games().get("crash")
+        if not cfg:
+            return None, "This game is not available right now."
+        try:
+            au = float(auto or 0)
+        except (TypeError, ValueError):
+            au = 0
+        if au and not (1.01 <= au <= cfg["max"]):
+            return None, "Auto eject needs to be 1.01x or more."
+        au = round(au, 2)
+        def go(db):
+            now = time.time()
+            old = self._crash_round(db, pid)
+            if old:
+                if self._crash_resolve(db, pid, old, now, False) is None:
+                    raise GameErr("You already have a round in progress.")
+            b = self._bet(bet)
+            f = self._gf(db, pid, "crash")
+            h = hashlib.sha256(("%s:%s:%d" % (f["seed"], f["cs"], f["nonce"])).encode()).hexdigest()
+            cp = self._crash_point(h, cfg)
+            self._stake(db, pid, b, "Flying Roadster bet")
+            st = {"bet": b, "auto": au, "cp": cp, "t0": now + self.CR_WAIT}
+            db.execute("INSERT OR REPLACE INTO rounds(pid,game,st) VALUES(?,?,?)", (pid, "crash", json.dumps(st)))
+            return {"ok": True, "bet_cents": b, "wait": self.CR_WAIT, "rate": cfg["rate"], "fair": {"commit": self._gf_out(f)["commit"], "cs": f["cs"], "nonce": f["nonce"]}}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def crash_cash(self, pid):
+        def go(db):
+            st = self._crash_round(db, pid)
+            if not st:
+                raise GameErr("No round in progress.")
+            res = self._crash_resolve(db, pid, st, time.time(), True)
+            return res
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    # ----- Battles and Upgrader -----
+    def battle(self, pid, bname):
+        b = self.boxes().get(str(bname))
+        if not b:
+            return None, "That box is not available right now. Please refresh the page."
+        def go(db):
+            f = self._gf(db, pid, "battle")
+            rolls = []
+            for k in (0, 1):
+                h = hashlib.sha256(("%s:%s:%d:%d" % (f["seed"], f["cs"], f["nonce"], k)).encode()).hexdigest()
+                rolls.append(int(h[:8], 16) / 4294967296)
+            ia, ib = self._pick(b["i"], rolls[0]), self._pick(b["i"], rolls[1])
+            A, Bb = b["i"][ia], b["i"][ib]
+            win = A[2] >= Bb[2]
+            self._stake(db, pid, b["p"], "Battle: " + str(bname))
+            items = []
+            if win:
+                now = time.time()
+                for idx, it in ((ia, A), (ib, Bb)):
+                    cur = db.execute("INSERT INTO items(pid,bname,name,icon,value_cents,rar,created) VALUES(?,?,?,?,?,?,?)", (pid, str(bname), it[0], it[1], it[2], self._tier(idx, len(b["i"])), now))
+                    items.append(self._item_out(db.execute("SELECT * FROM items WHERE id=?", (cur.lastrowid,)).fetchone()))
+            db.execute("INSERT INTO plays(pid,game,bet_cents,pay_cents,mult,ts) VALUES(?,?,?,?,?,?)", (pid, "battle", b["p"], (A[2] + Bb[2]) if win else 0, 0, time.time()))
+            used, f2 = self._gf_roll(db, pid, "battle", {"box": str(bname), "a": ia, "b": ib})
+            return {"ok": True, "win": win, "a": ia, "b": ib, "items": items, "fair": self._gf_out(f2)}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    UP_MU = (1.5, 2, 5, 10)
+
+    def upgrade(self, pid, sid, mu):
+        try:
+            mu = float(mu)
+        except (TypeError, ValueError):
+            mu = 0
+        if mu not in self.UP_MU:
+            return None, "Choose a multiplier again."
+        m = re.fullmatch(r"s(\d{1,12})", str(sid))
+        if not m:
+            return None, "That item was not found."
+        chance = int(95 // mu)
+        def go(db):
+            r = db.execute("SELECT * FROM items WHERE id=? AND pid=?", (int(m.group(1)), pid)).fetchone()
+            if not r or r["status"] != "held":
+                raise GameErr("That item was not found.")
+            if r["ship"]:
+                raise GameErr("Cancel the shipment first to upgrade this item.")
+            f = self._gf(db, pid, "upgrade")
+            h = hashlib.sha256(("%s:%s:%d" % (f["seed"], f["cs"], f["nonce"])).encode()).hexdigest()
+            roll = int(h[:8], 16) / 4294967296 * 100
+            win = roll < chance
+            db.execute("UPDATE items SET status=? WHERE id=?", ("upgraded" if win else "lost", r["id"]))
+            item = None
+            if win:
+                v = int((Decimal(r["value_cents"]) * Decimal(repr(mu))).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+                rar = 4 if mu >= 10 else 3 if mu >= 5 else 2 if mu >= 2 else 1
+                cur = db.execute("INSERT INTO items(pid,bname,name,icon,value_cents,rar,created) VALUES(?,?,?,?,?,?,?)", (pid, "Upgrader", "Upgrade prize", "up", v, rar, time.time()))
+                item = self._item_out(db.execute("SELECT * FROM items WHERE id=?", (cur.lastrowid,)).fetchone())
+            db.execute("INSERT INTO plays(pid,game,bet_cents,pay_cents,mult,ts) VALUES(?,?,?,?,?,?)", (pid, "upgrade", r["value_cents"], item and int(item["v"] * 100) or 0, mu, time.time()))
+            used, f2 = self._gf_roll(db, pid, "upgrade", {"item": r["id"], "mu": mu, "chance": chance, "roll": roll})
+            return {"ok": True, "win": win, "item": item, "chance": chance, "roll": roll, "fair": self._gf_out(f2), "lost": r["name"]}
+        return self._run(go)
+
+    def crash_cancel(self, pid):
+        """Player left during the countdown: the bet goes back (only possible before take-off)."""
+        def go(db):
+            st = self._crash_round(db, pid)
+            if not st:
+                return {"done": True, "none": True}
+            if time.time() >= st["t0"]:
+                raise GameErr("The roadster already took off.")
+            self._post(db, pid, "refund", st["bet"], "G", "Flying Roadster bet returned")
+            db.execute("DELETE FROM rounds WHERE pid=? AND game='crash'", (pid,))
+            return {"done": True, "refund": True}
+        out, err = self._run(go)
+        if out:
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
+    def crash_state(self, pid):
+        def go(db):
+            st = self._crash_round(db, pid)
+            if not st:
+                return {"active": False}
+            now = time.time()
+            res = self._crash_resolve(db, pid, st, now, False)
+            if res:
+                res["active"] = False
+                return res
+            return {"active": True, "t": now - st["t0"], "bet_cents": st["bet"], "auto": st["auto"]}
+        out, err = self._run(go)
+        if out and out.get("done"):
+            out["wallet"] = self.wallet_view(pid)
+        return out, err
+
     def request_deposit(self, pid, coin_id, amount, txid):
         db = self.wdb()
         try:
@@ -845,9 +1292,43 @@ class Players:
             tot = db.execute("SELECT COALESCE(SUM(real_cents),0) s, COUNT(*) n FROM players WHERE real_cents<>0").fetchone()
             bad = rows("SELECT p.id, p.email, p.real_cents, COALESCE((SELECT SUM(cents) FROM wallet_ledger l WHERE l.pid=p.id),0) AS ledger FROM players p WHERE p.real_cents <> COALESCE((SELECT SUM(cents) FROM wallet_ledger l WHERE l.pid=p.id),0)")
             aud = rows("SELECT ts,who,action,detail FROM audit ORDER BY id DESC LIMIT 40")
-            return {"deposits": dep, "withdrawals": wd, "settings": self.settings(db), "held_cents": tot["s"], "holders": tot["n"], "mismatch": bad, "audit": aud}
+            games = rows("SELECT game, COUNT(*) plays, COALESCE(SUM(bet_cents),0) wagered, COALESCE(SUM(pay_cents),0) paid FROM plays GROUP BY game")
+            bx = db.execute("SELECT COUNT(*) n, COALESCE(SUM(price_cents),0) w FROM opens").fetchone()
+            games.append({"game": "boxes", "plays": bx["n"], "wagered": bx["w"], "paid": 0})
+            held = db.execute("SELECT COALESCE(SUM(value_cents),0) v, COUNT(*) n FROM items WHERE status='held'").fetchone()
+            ship = []
+            for r in db.execute("SELECT i.id, i.name, i.icon, i.value_cents, i.bname, i.ship, i.pid, p.name pname, p.email, p.state FROM items i JOIN players p ON p.id=i.pid WHERE i.status='held' AND i.ship IS NOT NULL ORDER BY i.ship ASC LIMIT 100"):
+                addr = {}
+                try:
+                    addr = (json.loads(r["state"] or "{}").get("user") or {}).get("addr") or {}
+                except Exception:
+                    addr = {}
+                ship.append({"id": r["id"], "name": r["name"], "value_cents": r["value_cents"], "box": r["bname"], "requested": r["ship"], "player": r["pname"], "email": r["email"], "addr": {k: str(addr.get(k, ""))[:120] for k in ("n", "ci", "pc", "p", "l1", "l2", "city", "st", "z")}})
+            return {"deposits": dep, "withdrawals": wd, "settings": self.settings(db), "held_cents": tot["s"], "holders": tot["n"], "mismatch": bad, "audit": aud,
+                    "games": games, "items_held_cents": held["v"], "items_held": held["n"], "shipments": ship}
         finally:
             db.close()
+
+    def admin_shipment(self, iid, action, note, who):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            r = db.execute("SELECT * FROM items WHERE id=? AND status='held' AND ship IS NOT NULL", (iid,)).fetchone()
+            if not r:
+                db.execute("ROLLBACK")
+                return None, "That shipment was already handled."
+            if action == "shipped":
+                db.execute("UPDATE items SET status='shipped', sold=? WHERE id=?", (time.time(), iid))
+            elif action == "cancel":
+                db.execute("UPDATE items SET ship=NULL WHERE id=?", (iid,))
+            else:
+                db.execute("ROLLBACK")
+                return None, "Unknown action."
+            self.audit(db, who, "shipment_" + action, "item %d %s for player %d. %s" % (iid, r["name"], r["pid"], str(note or "")[:200]))
+            db.execute("COMMIT")
+        finally:
+            db.close()
+        return {"ok": True}, None
 
     def admin_deposit(self, did, action, amount, note, who):
         db = self.wdb()
@@ -1142,6 +1623,23 @@ class H(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             n = (parse_qs(urlparse(self.path).query).get("n") or [""])[0][:40]
             return self.send(200, {"free": app.players.name_free(n)})
+        if self.path.split("?")[0] in ("/api/gfair", "/api/gem/state", "/api/crash/state"):
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            path = self.path.split("?")[0]
+            if path == "/api/crash/state":
+                if not app.players.crash_poll.hit(p["id"]):
+                    return self.send(429, {"error": "Slow down a little."})
+                out, err = app.players.crash_state(p["id"])
+            elif path == "/api/gem/state":
+                out, err = app.players.gem_state(p["id"]), None
+            else:
+                from urllib.parse import urlparse, parse_qs
+                out, err = app.players.game_fair(p["id"], (parse_qs(urlparse(self.path).query).get("game") or [""])[0][:10])
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, out)
         if self.path == "/api/fair" or self.path == "/api/items":
             p = app.players.session_player(self.pcookie_val())
             if not p:
@@ -1268,6 +1766,39 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 since = 0
             return self.send(200, app.players.chat_admin_sync(since, body.get("add"), body.get("modes")))
+        if self.path in ("/api/plinko/drop", "/api/wheel/spin", "/api/gem/start", "/api/gem/pick", "/api/gem/cash", "/api/gem/leave", "/api/crash/start", "/api/crash/cash", "/api/crash/cancel", "/api/battle", "/api/upgrade"):
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            if not app.players.game_lim.hit(p["id"]):
+                return self.send(429, {"error": "Slow down a little and try again."})
+            pid, P = p["id"], app.players
+            if self.path == "/api/plinko/drop":
+                out, err = P.plinko_drop(pid, body.get("bet"), body.get("rows"), str(body.get("risk", ""))[:6])
+            elif self.path == "/api/wheel/spin":
+                out, err = P.wheel_spin(pid, body.get("bet"), body.get("n"), str(body.get("risk", ""))[:6])
+            elif self.path == "/api/gem/start":
+                out, err = P.gem_start(pid, body.get("bet"), body.get("mines"))
+            elif self.path == "/api/gem/pick":
+                out, err = P.gem_pick(pid, body.get("i"))
+            elif self.path == "/api/gem/cash":
+                out, err = P.gem_cash(pid)
+            elif self.path == "/api/gem/leave":
+                out, err = P.gem_leave(pid)
+            elif self.path == "/api/crash/start":
+                out, err = P.crash_start(pid, body.get("bet"), body.get("auto"))
+            elif self.path == "/api/battle":
+                out, err = P.battle(pid, str(body.get("box", ""))[:80])
+            elif self.path == "/api/upgrade":
+                out, err = P.upgrade(pid, body.get("id"), body.get("mu"))
+            elif self.path == "/api/crash/cancel":
+                out, err = P.crash_cancel(pid)
+            else:
+                out, err = P.crash_cash(pid)
+            if err:
+                return self.send(400, {"error": err})
+            out["ok"] = True
+            return self.send(200, out)
         if self.path in ("/api/fair/cs", "/api/box/open", "/api/item/sell", "/api/item/ship"):
             p = app.players.session_player(self.pcookie_val())
             if not p:
@@ -1319,6 +1850,8 @@ class H(BaseHTTPRequestHandler):
                         send_async(r["email"], "Your withdrawal was sent", *wallet_mail(r["name"], "Withdrawal sent", "Your withdrawal of $%.2f in %s was sent." % (r["cents"] / 100, esc_html(r["coin"]))))
                     else:
                         send_async(r["email"], "About your withdrawal", *wallet_mail(r["name"], "Withdrawal returned", "Your withdrawal could not be sent and $%.2f was returned to your wallet. %s" % (r["cents"] / 100, esc_html(note))))
+            elif act == "shipment":
+                r, err = app.players.admin_shipment(int(body.get("id") or 0), body.get("action"), note, who)
             elif act == "adjust":
                 r, err = app.players.admin_adjust(str(body.get("email", "")), body.get("amount"), note, who)
             elif act == "settings":
