@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Switch on emails (password reset, welcome):   wyn-mail-setup
+exec /usr/local/bin/wyn-api mail-setup

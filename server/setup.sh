@@ -55,6 +55,8 @@ id wynapi >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin
 install -d -m 700 -o wynapi -g wynapi /var/lib/wyn /var/lib/wyn/live /var/lib/wyn/staging
 install -m 755 "$SRC/wyn-api" /usr/local/bin/wyn-api
 install -m 755 "$SRC/wyn-admin-setup" /usr/local/bin/wyn-admin-setup
+install -m 755 "$SRC/wyn-mail-setup" /usr/local/bin/wyn-mail-setup
+install -d -m 750 -o root -g wynapi /etc/wyn
 install -m 644 "$SRC/wyn-api@.service" /etc/systemd/system/wyn-api@.service
 systemctl daemon-reload
 systemctl enable wyn-api@live wyn-api@staging >/dev/null 2>&1
