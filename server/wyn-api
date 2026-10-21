@@ -233,6 +233,7 @@ class Players:
         self.env = env
         self.box_file = os.environ.get("WYN_BOXES") or os.path.join(os.environ.get("WYN_SITE_BASE", "/srv/wynfun"), env, "data", "boxes.json")
         self._boxes = {"mt": None, "d": {}}
+        self._cfg_ver = 0
         self.open_lim = Limiter(60, 60)
         self.game_lim = Limiter(150, 60)
         self.crash_poll = Limiter(900, 60)
@@ -260,6 +261,7 @@ class Players:
         CREATE INDEX IF NOT EXISTS ps_pid ON psessions(pid);
         CREATE TABLE IF NOT EXISTS resets(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, exp REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS boxcfg(id INTEGER PRIMARY KEY, j TEXT NOT NULL, upd REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS wallet_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, kind TEXT NOT NULL, cents INTEGER NOT NULL, bal_after INTEGER NOT NULL, ref TEXT, note TEXT, created REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS wl_pid ON wallet_ledger(pid, id);
         CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, coin TEXT NOT NULL, network TEXT, claimed_cents INTEGER NOT NULL, txid TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', credited_cents INTEGER, created REAL NOT NULL, decided REAL, admin_note TEXT);
@@ -623,21 +625,129 @@ class Players:
             db.close()
 
     # ---------- boxes: the server decides every result ----------
+    def boxcfg_get(self):
+        db = self.db()
+        try:
+            r = db.execute("SELECT j, upd FROM boxcfg WHERE id=1").fetchone()
+        finally:
+            db.close()
+        if not r:
+            return {"bx": {}, "ver": 0}
+        try:
+            return {"bx": json.loads(r["j"]), "ver": r["upd"]}
+        except Exception:
+            return {"bx": {}, "ver": 0}
+
+    @staticmethod
+    def _eff(raw, o):
+        """The box as players get it: the shipped box plus the admin's edits (same rules as the site)."""
+        items = [[x[0], x[1], x[2], x[3]] for x in raw["i"]]
+        price = raw["p"]
+        off = False
+        names = [raw["n"]]
+        if o:
+            if isinstance(o.get("items"), list) and o["items"]:
+                items = [[x[0], x[1], x[2], x[3]] for x in o["items"]]
+            else:
+                for j, x in enumerate(o.get("i") or []):
+                    if j < len(items):
+                        items[j][2] = x[0]
+                        items[j][3] = x[1]
+                for j, x in enumerate(o.get("nm") or []):
+                    if x and j < len(items):
+                        items[j][0] = x
+            if isinstance(o.get("p"), (int, float)) and o["p"] > 0:
+                price = o["p"]
+            off = bool(o.get("off"))
+            if o.get("n") and o["n"] not in names:
+                names.append(o["n"])
+        return names, price, items, off
+
     def boxes(self):
-        """Box list shipped with the site (data/boxes.json). Reloads itself when the file changes."""
+        """Box list shipped with the site (data/boxes.json) plus the admin's saved edits. Reloads itself when either changes."""
         try:
             mt = os.path.getmtime(self.box_file)
         except OSError:
             return self._boxes["d"]
-        if mt != self._boxes["mt"]:
+        if mt != self._boxes["mt"] or self._boxes.get("cv") != self._cfg_ver:
             raw = json.load(open(self.box_file))
+            cfg = self.boxcfg_get()["bx"]
             d = {}
             for b in raw:
-                its = [(str(x[0])[:120], str(x[1])[:60], int(round(float(x[2]) * 100)), float(x[3])) for x in b["i"]]
-                if its and all(i[3] > 0 and i[2] >= 0 for i in its):
-                    d[str(b["n"])] = {"p": int(round(float(b["p"]) * 100)), "i": its}
-            self._boxes = {"mt": mt, "d": d}
+                names, price, items, off = self._eff(b, cfg.get(str(b["n"])))
+                its = [(str(x[0])[:120], str(x[1])[:60], int(round(float(x[2]) * 100)), float(x[3])) for x in items]
+                if its and all(i[3] >= 0 and i[2] >= 0 for i in its) and sum(i[3] for i in its) > 0:
+                    for nm in names:
+                        d[str(nm)] = {"p": int(round(float(price) * 100)), "i": its, "off": off}
+            self._boxes = {"mt": mt, "d": d, "cv": self._cfg_ver}
         return self._boxes["d"]
+
+    def admin_boxcfg_set(self, bx, who):
+        """Validate and save the admin's box edits. Returns (info, error)."""
+        if not isinstance(bx, dict) or len(json.dumps(bx)) > 1500000:
+            return None, "That box data is not valid."
+        raw = {str(b["n"]): b for b in json.load(open(self.box_file))}
+        clean, warn, changes = {}, [], []
+        for k, o in bx.items():
+            k = str(k)[:120]
+            if k not in raw or not isinstance(o, dict):
+                continue
+            c = {}
+            def num(v, lo, hi):
+                return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and lo <= v <= hi
+            if "p" in o:
+                if not num(o["p"], 0.5, 1000000):
+                    return None, "%s: the price must be between $0.50 and $1,000,000." % k
+                c["p"] = round(float(o["p"]), 2)
+            for f, ln in (("c", 40), ("desc", 600), ("tag", 20), ("n", 60)):
+                if isinstance(o.get(f), str):
+                    c[f] = o[f][:ln]
+            c["off"] = bool(o.get("off"))
+            n_items = len(raw[k]["i"])
+            if isinstance(o.get("items"), list) and o["items"]:
+                its = []
+                for x in o["items"][:200]:
+                    if not (isinstance(x, list) and len(x) >= 4 and num(x[2], 0, 100000000) and num(x[3], 0, 1000000000)):
+                        return None, "%s: every prize needs a name, a value of $0 or more and a chance of 0% or more." % k
+                    its.append([str(x[0])[:120], str(x[1])[:60], float(x[2]), float(x[3]), str(x[4])[:300] if len(x) > 4 else ""])
+                c["items"] = its
+                n_items = len(its)
+            else:
+                if isinstance(o.get("i"), list):
+                    li = []
+                    for x in o["i"][:n_items]:
+                        if not (isinstance(x, list) and len(x) >= 2 and num(x[0], 0, 100000000) and num(x[1], 0, 1000000000)):
+                            return None, "%s: every prize needs a value of $0 or more and a chance of 0% or more." % k
+                        li.append([float(x[0]), float(x[1])])
+                    c["i"] = li
+                if isinstance(o.get("nm"), list):
+                    c["nm"] = [str(x)[:120] if x else "" for x in o["nm"][:n_items]]
+                if isinstance(o.get("ds"), list):
+                    c["ds"] = [str(x)[:300] if x else "" for x in o["ds"][:n_items]]
+            names, price, items, off = self._eff(raw[k], c)
+            tw = sum(x[3] for x in items)
+            if tw <= 0:
+                return None, "%s: at least one prize needs a chance above 0." % k
+            rtp = (sum(float(x[2]) * float(x[3]) for x in items) / tw / price) if tw > 0 and price > 0 else 0
+            if rtp > 1:
+                warn.append("%s returns %d%% of its price, which loses money on average." % (k, round(rtp * 100)))
+            changes.append({"box": k, "price": price, "rtp_pct": round(rtp * 100, 1), "off": off})
+            clean[k] = c
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT j FROM boxcfg WHERE id=1").fetchone()
+            oldc = json.loads(old["j"]) if old else {}
+            diff = [ch for ch in changes if json.dumps(clean.get(ch["box"]), sort_keys=True) != json.dumps(oldc.get(ch["box"]), sort_keys=True)]
+            diff += [{"box": k, "reset": True} for k in oldc if k not in clean]
+            if diff or (not old and clean):
+                db.execute("INSERT OR REPLACE INTO boxcfg(id,j,upd) VALUES(1,?,?)", (json.dumps(clean), time.time()))
+                self.audit(db, who, "boxes_changed", {"boxes": diff[:25], "count": len(diff)})
+            db.execute("COMMIT")
+        finally:
+            db.close()
+        self._cfg_ver += 1
+        return {"saved": len(clean), "changed": len(diff), "warnings": warn}, None
 
     @staticmethod
     def _pick(items, r):
@@ -695,7 +805,7 @@ class Players:
 
     def open_box(self, pid, bname):
         b = self.boxes().get(str(bname))
-        if not b:
+        if not b or b.get("off"):
             return None, "That box is not available right now. Please refresh the page."
         db = self.wdb()
         try:
@@ -1132,7 +1242,7 @@ class Players:
     # ----- Battles and Upgrader -----
     def battle(self, pid, bname):
         b = self.boxes().get(str(bname))
-        if not b:
+        if not b or b.get("off"):
             return None, "That box is not available right now. Please refresh the page."
         def go(db):
             f = self._gf(db, pid, "battle")
@@ -1691,6 +1801,8 @@ class H(BaseHTTPRequestHandler):
         app = self.server.app
         if self.path == "/api/admin/me":
             return self.send(200, {"ok": app.check_session(self.cookie_val())})
+        if self.path == "/api/boxcfg":
+            return self.send(200, app.players.boxcfg_get())
         if self.path == "/api/recent":
             return self.send(200, app.players.recent())
         if self.path == "/api/health":
@@ -1948,6 +2060,13 @@ class H(BaseHTTPRequestHandler):
             if err:
                 return self.send(400, {"error": err})
             return self.send(200, {"ok": True, "wallet": app.players.admin_wallet()})
+        if self.path == "/api/admin/boxcfg":
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            r, err = app.players.admin_boxcfg_set(body.get("bx"), "admin")
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, dict(r, ok=True))
         if self.path == "/api/admin/logout":
             app.end_session(self.cookie_val())
             return self.send(200, {"ok": True}, self.set_cookie("", 0))
