@@ -116,31 +116,50 @@ def send_async(to, subject, text, html=None):
 def esc_html(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
-def email_html(title, paragraphs, button=None, small=None):
-    """One simple, good-looking layout for every email (works in Gmail, Outlook and phones)."""
-    body = "".join('<p style="margin:0 0 16px;font-size:16px;line-height:1.55;color:#d6dbe6">%s</p>' % p for p in paragraphs)
-    btn = ""
+SITE = "https://wyn.fun"      # pictures in emails always come from the live site
+
+def email_html(title, paragraphs, button=None, small=None, hero=False, steps=None, preheader=""):
+    """One branded layout for every email (works in Gmail, Outlook and phones; dark card, lime button)."""
+    F = "font-family:Arial,Helvetica,sans-serif;"
+    top = ('<tr><td style="padding:0;line-height:0;font-size:0"><img src="%s/img/mail/hero.jpg" width="560" alt="wyn.fun - See every prize. Check every result." '
+           'style="display:block;width:100%%;max-width:560px;height:auto;border-radius:20px 20px 0 0"></td></tr>' % SITE) if hero else (
+          '<tr><td style="padding:28px 32px 0;line-height:0"><img src="%s/img/mail/logo.png" width="130" height="33" alt="wyn.fun" style="display:block"></td></tr>' % SITE)
+    body = "".join('<p style="margin:0 0 16px;%sfont-size:16px;line-height:1.6;color:#d6dbe6">%s</p>' % (F, p) for p in paragraphs)
     if button:
-        btn = ('<table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 22px"><tr><td style="border-radius:12px;background:#c8ff3d">'
-               '<a href="%s" style="display:inline-block;padding:14px 26px;font-size:16px;font-weight:800;color:#0b0e13;text-decoration:none;border-radius:12px">%s</a></td></tr></table>' % (esc_html(button[1]), esc_html(button[0])))
-        body += btn + '<p style="margin:0 0 16px;font-size:13px;line-height:1.5;color:#8b97a8">Button not working? Copy this link into your browser:<br><a href="%s" style="color:#c8ff3d;word-break:break-all">%s</a></p>' % (esc_html(button[1]), esc_html(button[1]))
+        body += ('<table role="presentation" cellpadding="0" cellspacing="0" style="margin:10px 0 24px"><tr><td bgcolor="#c8ff3d" style="border-radius:12px;background:#c8ff3d">'
+                 '<a href="%s" style="display:inline-block;padding:15px 30px;%sfont-size:16px;font-weight:800;color:#0b0e13;text-decoration:none;border-radius:12px">%s</a></td></tr></table>'
+                 % (esc_html(button[1]), F, esc_html(button[0])))
+    if steps:
+        rows = "".join('<tr><td width="34" valign="top" style="padding:0 0 12px"><div style="width:26px;height:26px;border-radius:13px;background:#8b5cff;color:#ffffff;%sfont-size:13px;font-weight:800;line-height:26px;text-align:center">%d</div></td>'
+                       '<td valign="top" style="padding:3px 0 12px;%sfont-size:15px;line-height:1.45;color:#d6dbe6"><b style="color:#ffffff">%s</b><br><span style="color:#8b97a8">%s</span></td></tr>' % (F, i + 1, F, esc_html(a), esc_html(b)) for i, (a, b) in enumerate(steps))
+        body += '<table role="presentation" cellpadding="0" cellspacing="0" width="100%%" style="margin:4px 0 10px;border-top:1px solid #263041;padding-top:18px"><tr><td colspan="2" style="padding:18px 0 14px;%sfont-size:12px;letter-spacing:1.5px;color:#8b97a8;font-weight:700">HOW IT WORKS</td></tr>%s</table>' % (F, rows)
+    if button:
+        body += '<p style="margin:0 0 14px;%sfont-size:13px;line-height:1.5;color:#8b97a8">Button not working? Copy this link into your browser:<br><a href="%s" style="color:#c8ff3d;word-break:break-all">%s</a></p>' % (F, esc_html(button[1]), esc_html(button[1]))
     if small:
-        body += '<p style="margin:0;font-size:13px;line-height:1.5;color:#8b97a8">%s</p>' % small
-    return ('<!doctype html><html><body style="margin:0;padding:0;background:#0b0e13">'
-            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="background:#0b0e13"><tr><td align="center" style="padding:28px 14px">'
-            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#141a24;border:1px solid #263041;border-radius:20px">'
-            '<tr><td style="padding:28px 28px 8px;font-family:Arial,Helvetica,sans-serif"><div style="font-size:24px;font-weight:900;letter-spacing:-.5px;color:#ffffff">wyn<span style="color:#c8ff3d">.</span>fun</div></td></tr>'
-            '<tr><td style="padding:8px 28px 28px;font-family:Arial,Helvetica,sans-serif"><h1 style="margin:14px 0 14px;font-size:26px;line-height:1.2;color:#ffffff">%s</h1>%s</td></tr></table>'
-            '<p style="margin:16px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#6b7686">wyn.fun is a demo. Balances and items are virtual and have no cash value.</p>'
-            '</td></tr></table></body></html>') % (esc_html(title), body)
+        body += '<p style="margin:0;%sfont-size:13px;line-height:1.55;color:#8b97a8">%s</p>' % (F, small)
+    pre = '<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#0b0e13">%s</div>' % esc_html(preheader) if preheader else ""
+    return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark"><title>%s</title></head>'
+            '<body bgcolor="#0b0e13" style="margin:0;padding:0;background:#0b0e13">%s'
+            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" bgcolor="#0b0e13" style="background:#0b0e13"><tr><td align="center" style="padding:24px 12px">'
+            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" bgcolor="#151a22" style="max-width:560px;background:#151a22;border:1px solid #263041;border-radius:20px">'
+            '%s<tr><td style="padding:22px 32px 30px"><h1 style="margin:0 0 14px;%sfont-size:27px;line-height:1.2;color:#ffffff;letter-spacing:-.3px">%s</h1>%s</td></tr>'
+            '<tr><td style="padding:16px 32px;border-top:1px solid #263041;%sfont-size:12px;line-height:1.5;color:#8b97a8;text-align:center">&#10003; Every prize and its odds shown &nbsp;&middot;&nbsp; &#10003; Sell back instantly &nbsp;&middot;&nbsp; &#10003; Provably fair</td></tr></table>'
+            '<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="max-width:560px"><tr><td align="center" style="padding:18px 8px 0;%sfont-size:12px;line-height:1.6;color:#6b7686">'
+            '<a href="https://instagram.com/wyndotfun" style="color:#8b97a8;text-decoration:none">Instagram</a> &nbsp;&middot;&nbsp; <a href="https://x.com/wynfun" style="color:#8b97a8;text-decoration:none">X</a> &nbsp;&middot;&nbsp; <a href="%s" style="color:#8b97a8;text-decoration:none">wyn.fun</a><br>'
+            'wyn.fun is a demo. Balances and items are virtual and have no cash value.</td></tr></table>'
+            '</td></tr></table></body></html>') % (esc_html(title), pre, top, F, esc_html(title), body, F, F, SITE)
 
 def welcome_mail(name, url):
-    text = ("Hi %s,\n\nWelcome to wyn.fun! Your account is ready.\n\nOpen your first box: %s\n\nwyn.fun is a demo for now: balances and items are virtual and have no cash value.\n\nwyn.fun" % (name, url))
+    text = ("Hi %s,\n\nWelcome to wyn.fun! Your account is ready.\n\nHow it works:\n1. Pick a box - see every prize and its odds.\n2. Open it - the result is provably fair.\n3. Sell the item back instantly, or ship it to your door.\n\nOpen your first box: %s\n\nwyn.fun is a demo for now: balances and items are virtual and have no cash value.\n\nwyn.fun" % (name, url))
     html = email_html("Welcome, %s!" % name,
-                      ["Your wyn.fun account is ready. Pick a box, see every prize and its odds, and open it when you feel lucky.",
-                       "You start with a demo balance, so you can try everything for free."],
+                      ["Your wyn.fun account is ready. You start with a demo balance, so you can try everything for free."],
                       ("Open your first box", url),
-                      "You are getting this email because an account was created with this address.")
+                      "You are getting this email because an account was created with this address.",
+                      hero=True,
+                      steps=[("Pick a box", "See every prize and its odds before you open."),
+                             ("Open it", "Every result is provably fair, and you can check it."),
+                             ("Keep, sell or ship", "Sell back instantly, or ship it to your door.")],
+                      preheader="Your account is ready. Open your first box.")
     return text, html
 
 def reset_mail(name, link):
@@ -148,7 +167,8 @@ def reset_mail(name, link):
     html = email_html("Reset your password",
                       ["Hi %s," % esc_html(name), "Someone (hopefully you) asked to reset your wyn.fun password. Tap the button to choose a new one."],
                       ("Choose a new password", link),
-                      "The link works once and expires in 1 hour. If you did not ask for this, you can ignore this email. Your password stays the same.")
+                      "&#128274; The link works once and expires in 1 hour. If you did not ask for this, you can ignore this email. Your password stays the same.",
+                      preheader="Use this link within 1 hour to choose a new password.")
     return text, html
 
 
@@ -842,7 +862,7 @@ def mail_setup():
         pass
     to = input("Send a test email to which address (leave empty to skip): ").strip()
     if to:
-        ok, msg = send_mail(to, "wyn.fun test email", "If you can read this, wyn.fun can send emails.", email_html("It works!", ["If you can read this, wyn.fun can send emails."], ("Open wyn.fun", base_url("live"))))
+        ok, msg = send_mail(to, "wyn.fun test email", "If you can read this, wyn.fun can send emails.", email_html("It works!", ["If you can read this, wyn.fun can send emails."], ("Open wyn.fun", base_url("live")), hero=True))
         print("\nTest email:", "SENT. Check your inbox (and spam)." if ok else "FAILED: " + msg)
         if not ok:
             print("Tip: Resend only sends from a domain you verified. Check the DNS records in Resend.")
