@@ -9,6 +9,7 @@ Admin login = username + password + 6-digit code from an authenticator app.
 Passwords are stored only as a salted scrypt hash. Nothing secret is in GitHub.
 """
 import base64, getpass, hashlib, hmac, json, os, re, secrets, shutil, sqlite3, struct, subprocess, sys, threading, time
+import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORTS = {"live": 8081, "staging": 8082}
@@ -75,6 +76,48 @@ class Guard:
         self.ip.pop(ip, None)
 
 
+# ---------- email (optional: switched on by `wyn-mail-setup`) ----------
+MAIL_FILE = os.environ.get("WYN_MAIL_FILE", "/etc/wyn/mail.json")
+MAIL_URL = os.environ.get("WYN_MAIL_URL", "https://api.resend.com/emails")
+
+def mail_conf():
+    c = read_json(MAIL_FILE, None)
+    return c if isinstance(c, dict) and c.get("api_key") and c.get("from") else None
+
+def send_mail(to, subject, text):
+    """Sends one email through Resend. Never raises; returns (ok, message)."""
+    c = mail_conf()
+    if not c:
+        return False, "email is not set up"
+    try:
+        req = urllib.request.Request(
+            MAIL_URL,
+            data=json.dumps({"from": c["from"], "to": [to], "subject": subject, "text": text}).encode(),
+            headers={"Authorization": "Bearer " + c["api_key"], "Content-Type": "application/json", "User-Agent": "wyn-api/1.0"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=12) as r:
+            return True, "sent (%d)" % r.status
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("message", "")
+        except Exception:
+            msg = ""
+        return False, "HTTP %d %s" % (e.code, msg[:200])
+    except Exception as e:
+        return False, str(e)[:200]
+
+def send_async(to, subject, text):
+    def run():
+        ok, msg = send_mail(to, subject, text)
+        if not ok:
+            sys.stderr.write("mail to a player failed: %s\n" % msg)
+    threading.Thread(target=run, daemon=True).start()
+
+def base_url(env):
+    c = mail_conf() or {}
+    return (c.get("base_" + env) or ("https://wyn.fun" if env == "live" else "https://staging.wyn.fun")).rstrip("/")
+
+
 # ---------- players ----------
 PCOOKIE = "__Host-wyn_player"
 PSESSION_IDLE = 30 * 24 * 3600
@@ -116,6 +159,9 @@ class Players:
         self.login_id = Limiter(10, 900)
         self.name_lim = Limiter(60, 600)
         self.chat_lim = Limiter(90, 60)
+        self.forgot_ip = Limiter(5, 3600)
+        self.forgot_em = Limiter(3, 3600)
+        self.reset_lim = Limiter(10, 900)
         self.chat_msg_lim = Limiter(20, 60)
         db = self.db()
         db.executescript("""
@@ -125,6 +171,7 @@ class Players:
           last_login REAL, state TEXT, ver INTEGER NOT NULL DEFAULT 0, upd REAL, banned INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS psessions(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, idle REAL NOT NULL, mx REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS ps_pid ON psessions(pid);
+        CREATE TABLE IF NOT EXISTS resets(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, exp REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
         INSERT OR IGNORE INTO meta(k,v) VALUES('chatseq',0);
         CREATE TABLE IF NOT EXISTS chat_threads(pid INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'ai', ru INTEGER NOT NULL DEFAULT 0, ra INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0, upd REAL);
@@ -224,6 +271,40 @@ class Players:
         db.execute("DELETE FROM psessions WHERE h=?", (sha(tok or ""),))
         db.commit()
         db.close()
+
+    def make_reset(self, email):
+        """Returns (name, token) for an existing, not-banned account, else None."""
+        db = self.db()
+        try:
+            r = db.execute("SELECT id,name FROM players WHERE email=? AND banned=0", (email.strip().lower(),)).fetchone()
+            if not r:
+                return None
+            tok = secrets.token_urlsafe(32)
+            db.execute("DELETE FROM resets WHERE exp<?", (time.time(),))
+            db.execute("INSERT INTO resets(h,pid,exp) VALUES(?,?,?)", (sha(tok), r["id"], time.time() + 3600))
+            db.commit()
+            return r["name"], tok
+        finally:
+            db.close()
+
+    def use_reset(self, tok, password):
+        if len(password) < 8:
+            return "Your password needs at least 8 characters."
+        if len(password) > 200:
+            return "That password is too long."
+        db = self.db()
+        try:
+            r = db.execute("SELECT * FROM resets WHERE h=?", (sha(tok),)).fetchone()
+            if not r or r["used"] or r["exp"] < time.time():
+                return "This reset link has expired or was already used. Please ask for a new one."
+            salt = secrets.token_bytes(16)
+            db.execute("UPDATE players SET salt=?, hash=? WHERE id=?", (salt, scrypt(password, salt), r["pid"]))
+            db.execute("UPDATE resets SET used=1 WHERE h=?", (r["h"],))
+            db.execute("DELETE FROM psessions WHERE pid=?", (r["pid"],))
+            db.commit()
+            return None
+        finally:
+            db.close()
 
     def name_free(self, name):
         n = name.strip().lower()
@@ -535,7 +616,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"ok": True, "env": app.env})
         if self.path == "/api/me":
             p = app.players.session_player(self.pcookie_val())
-            return self.send(200, {"api": True, "user": app.players.public(p) if p else None})
+            return self.send(200, {"api": True, "mail": bool(mail_conf()), "user": app.players.public(p) if p else None})
         if self.path.startswith("/api/name?"):
             if not app.players.name_lim.hit(self.ip()):
                 return self.send(429, {"error": "slow down"})
@@ -578,6 +659,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(400, {"error": err})
             tok = app.players.new_session(pid)
             p = app.players.session_player(tok)
+            if mail_conf():
+                send_async(p["email"], "Welcome to wyn.fun", "Hi %s,\n\nYour wyn.fun account is ready. Have fun opening boxes!\n\nwyn.fun is a demo for now: balances and items are virtual and have no cash value.\n\nwyn.fun" % p["name"])
             return self.send(200, {"ok": True, "user": app.players.public(p)}, self.set_pcookie(tok, PSESSION_MAX))
         if self.path == "/api/login":
             ip = self.ip()
@@ -594,6 +677,26 @@ class H(BaseHTTPRequestHandler):
             tok = app.players.new_session(pid)
             p = app.players.session_player(tok)
             return self.send(200, {"ok": True, "user": app.players.public(p)}, self.set_pcookie(tok, PSESSION_MAX))
+        if self.path == "/api/forgot":
+            email = str(body.get("email", ""))[:260].strip().lower()
+            ip = self.ip()
+            if not mail_conf():
+                return self.send(200, {"ok": True, "mail": False})
+            if not (app.players.forgot_ip.hit(ip) and app.players.forgot_em.hit(email)):
+                return self.send(429, {"error": "Too many requests. Please try again later."})
+            r = app.players.make_reset(email) if EMAIL_RE.match(email) else None
+            if r:
+                link = "%s/?reset=%s" % (base_url(app.env), r[1])
+                send_async(email, "Reset your wyn.fun password",
+                           "Hi %s,\n\nSomeone (hopefully you) asked to reset your wyn.fun password.\nOpen this link to choose a new one. It works once and expires in 1 hour:\n\n%s\n\nIf you did not ask for this, you can ignore this email. Your password stays the same.\n\nwyn.fun" % (r[0], link))
+            return self.send(200, {"ok": True, "mail": True})
+        if self.path == "/api/reset":
+            if not app.players.reset_lim.hit(self.ip()):
+                return self.send(429, {"error": "Too many tries. Please wait a few minutes."})
+            err = app.players.use_reset(str(body.get("token", ""))[:100], str(body.get("password", ""))[:300])
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, {"ok": True})
         if self.path == "/api/logout":
             app.players.end_session(self.pcookie_val())
             return self.send(200, {"ok": True}, self.set_pcookie("", 0))
@@ -685,12 +788,35 @@ def setup(which):
     print("\nDone. Admin login saved for: %s. Open https://wyn.fun/#admin to try it.\n" % ", ".join(envs))
 
 
+def mail_setup():
+    print("\nEmail setup (uses the free Resend service).\n")
+    key = getpass.getpass("Paste your Resend API key (nothing shows while you paste): ").strip()
+    frm = input("Send emails from [wyn.fun <noreply@wyn.fun>]: ").strip() or "wyn.fun <noreply@wyn.fun>"
+    os.makedirs(os.path.dirname(MAIL_FILE), exist_ok=True)
+    conf = {"api_key": key, "from": frm}
+    write_json(MAIL_FILE, conf, 0o640)
+    try:
+        import grp
+        os.chown(MAIL_FILE, 0, grp.getgrnam("wynapi").gr_gid)
+    except Exception:
+        pass
+    to = input("Send a test email to which address (leave empty to skip): ").strip()
+    if to:
+        ok, msg = send_mail(to, "wyn.fun test email", "If you can read this, wyn.fun can send emails.")
+        print("\nTest email:", "SENT. Check your inbox (and spam)." if ok else "FAILED: " + msg)
+        if not ok:
+            print("Tip: Resend only sends from a domain you verified. Check the DNS records in Resend.")
+    print("\nDone. Password reset and welcome emails are now switched on.\n")
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if len(a) == 2 and a[0] == "serve" and a[1] in PORTS:
         serve(a[1])
     elif len(a) == 2 and a[0] == "setup" and a[1] in ("live", "staging", "both"):
         setup(a[1])
+    elif len(a) == 1 and a[0] == "mail-setup":
+        mail_setup()
     else:
         print(__doc__)
         sys.exit(2)
