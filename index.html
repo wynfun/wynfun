@@ -2003,7 +2003,7 @@ function initWyn3D(){try{
 var TAGS={"Rags to Riches": "New", "Pit Lane": "New", "Monochrome": "New", "Bavarian Heat": "New", "Serpent Queen": "New", "Mademoiselle": "New", "Daily Grind": "New", "Four Rings": "New", "Heavy Duty": "New", "Oyster Club": "New", "Gold Fever": "New", "Crown Jewel": "New", "Ice Cold": "New", "Redline": "New", "Raging Lambo": "New", "Home Cinema": "New", "Silly Money": "New", "British Racing": "Big win", "Dynasty Edition": "Big win", "New Year New Ride": "Hot", "Raging Bull": "Hot", "Hell Gate": "Hot", "No Filter": "Hot", "Sneaker Heat": "New", "Street Kit": "New", "Tech Haul": "New", "Ice Starter": "New", "Bag Check": "New", "Wrist Game": "New", "Garage Pass": "New", "Gold Standard": "New", "Card Shop": "New", "Jackpot Mix": "New", "Horologist": "New", "Night Shift": "New", "Honored One": "New", "Rose": "New", "Ten Past Ten": "New", "White Gold": "New", "The Investor": "New", "Pony Show": "New", "Last Bet": "New", "Glow Up Kit": "New", "Baggy": "New", "Brabus": "New", "Rolls-Royce": "New", "Maybach Boys": "New", "High Roller": "New", "Patek Philippe": "New", "Gucci": "New", "Loro Piana": "New"},CATS=["All", "Cars", "Watches", "Fashion", "Jewelry", "Electronics", "Collectibles", "Mixed luxury"],HOTB=["New Year New Ride", "Raging Bull", "Hell Gate", "No Filter"],MU=[1.5,2,5,10],NM=['alex','mia','kai','zoe','leo','noor','ivy','sam','nico','ruby'];
 
 /* ---------- state ---------- */
-var S={bal:1000,inv:[],hist:[],daily:0,stats:{opens:0,spent:0,won:0,sold:0,best:null},user:{name:'Guest',email:'',color:'#8b5cff',since:Date.now(),guest:true},set:{sound:true,vol:.6,fast:false,drops:true,ui:true},
+var S={bal:0,inv:[],hist:[],daily:0,stats:{opens:0,spent:0,won:0,sold:0,best:null},user:{name:'Guest',email:'',color:'#8b5cff',since:Date.now(),guest:true},set:{sound:true,vol:.6,fast:false,drops:true,ui:true},
  cat:'All',q:'',cur:0,busy:false,sel:null,mu:2,view:'home',tab:'overview',rf:-1,sort:'value'};
 var BETS=[],BIG=[],BTAB='all',MT;
 (function(){try{var d=JSON.parse(localStorage.getItem('wyn5')||'null');if(!d)return;['bal','inv','hist','daily'].forEach(function(k){if(d[k]!==undefined)S[k]=d[k]});['stats','user','set'].forEach(function(k){if(d[k])Object.assign(S[k],d[k])});S.acct=d.acct||null}catch(e){}})();
@@ -2012,7 +2012,8 @@ function accGet(){try{var o=JSON.parse(localStorage.getItem(AK)||'null');if(o&&o
 function accPut(o){try{localStorage.setItem(AK,JSON.stringify(o))}catch(e){}}
 function snap(){var r={bal:S.bal,inv:S.inv,hist:S.hist,daily:S.daily,stats:S.stats,user:S.user,set:S.set};if(WAPI.ok&&WAPI.me){r.bal=0;r.inv=[];r.hist=[]}return r}
 function save(){try{var p=snap();p.acct=S.acct||null;localStorage.setItem('wyn5',JSON.stringify(p));if(S.acct){var o=accGet();o.s[S.acct]=snap();accPut(o)}}catch(e){}if(typeof WAPI!=='undefined'&&WAPI.push)WAPI.push()}
-function freshState(){S.bal=1000;S.inv=[];S.hist=[];S.daily=0;S.stats={opens:0,spent:0,won:0,sold:0,best:null};S.user={name:'Guest',email:'',color:'#8b5cff',since:Date.now(),guest:true};S.set={sound:true,vol:.6,fast:false,drops:true,ui:true};Snd.on=true;Snd.vol=.6;Snd.ui=true}
+function guestGate(){if(S.user&&S.user.guest){try{toast('Create a free account to play. You can try a free demo spin first.');Snd.err()}catch(e){}go('auth','signup');return true}return false}
+function freshState(){S.bal=0;S.inv=[];S.hist=[];S.daily=0;S.stats={opens:0,spent:0,won:0,sold:0,best:null};S.user={name:'Guest',email:'',color:'#8b5cff',since:Date.now(),guest:true};S.set={sound:true,vol:.6,fast:false,drops:true,ui:true};Snd.on=true;Snd.vol=.6;Snd.ui=true}
 function fmt(n){n=Number(n);return n.toLocaleString(undefined,n%1?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:2})}
 var tt;function toast(m){var t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(tt);tt=setTimeout(function(){t.classList.remove('on')},2600)}
 function log(type,txt,amt){S.hist.unshift({t:Date.now(),type:type,txt:txt,amt:amt||0});if(S.hist.length>80)S.hist.pop()}
@@ -2121,7 +2122,7 @@ function renderBets(){var rows=BETS.filter(function(b){return BTAB==='all'||(BTA
  document.querySelectorAll('#btabs .chip').forEach(function(c){c.setAttribute('aria-pressed',c.dataset.b===BTAB)})}
 
 /* ---------- render: shell ---------- */
-function renderTop(){document.body.classList.toggle('real',!!(WAPI.ok&&WAPI.me));$('bal').textContent=fmt(S.bal);var mb_=$('mbal');if(mb_)mb_.textContent=fmt(S.bal);var a=$('avBtn');a.innerHTML=avHTML();a.style.background=S.user.color;a.hidden=!!S.user.guest;$('authBtns').hidden=!S.user.guest;$('snd').classList.toggle('off',!S.set.sound);$('snd').setAttribute('aria-pressed',S.set.sound);var fd=$('feed');if(fd)fd.style.display=S.set.drops?'':'none'}
+function renderTop(){if(S.user&&S.user.guest)S.bal=0;document.body.classList.toggle('real',!!(WAPI.ok&&WAPI.me));var bb0=document.getElementById('balBtn');if(bb0)bb0.style.display=(S.user&&S.user.guest)?'none':'';$('bal').textContent=fmt(S.bal);var mb_=$('mbal');if(mb_)mb_.textContent=fmt(S.bal);var a=$('avBtn');a.innerHTML=avHTML();a.style.background=S.user.color;a.hidden=!!S.user.guest;$('authBtns').hidden=!S.user.guest;$('snd').classList.toggle('off',!S.set.sound);$('snd').setAttribute('aria-pressed',S.set.sound);var fd=$('feed');if(fd)fd.style.display=S.set.drops?'':'none'}
 function renderSide(){renderSide0();var d=$('sdc');if(d)d.innerHTML=$('side').innerHTML}
 function renderSide0(){var b=function(c,k,t){return '<button data-c="'+c+'" class="'+(S.view==='home'&&S.cat===c?'on':'')+'">'+ic(k)+' '+t+'</button>'},v=function(v,k,t,tab){return '<button data-v="'+v+'"'+(tab?' data-t="'+tab+'"':'')+' class="'+(S.view===v&&(!tab||S.tab===tab)?'on':'')+'">'+ic(k)+' '+t+'</button>'};
  $('side').innerHTML='<h6>BOXES</h6>'+b('All','crown','Popular')+CATS.filter(function(c){return c!=='All'}).map(function(c){return b(c,{Watches:'watch',Accessories:'glasses',Cars:'car',Fashion:'bag',Jewelry:'ring',Collectibles:'gem',Electronics:'phone',Gaming:'pad',Crypto:'btc'}[c]||'gem',c)}).join('')+'<h6>GAMES</h6>'+v('plinko','plinko','Wyn Drop')+v('gemhunt','gem','Gem Hunt')+v('wheel','wheel','Wyn Wheel')+('<h6>ACCOUNT</h6>'+v('account','crown','Dashboard','overview')+v('account','bag','My items','items')+v('account','case','Shipping','shipping')+v('account','gem','Rewards','affiliate')+v('account','wallet','Add funds','funds')+v('account','card','Withdraw','withdraw')+v('account','key','Settings','settings'))}
@@ -2176,6 +2177,7 @@ document.addEventListener('keydown',function(e){var o=$('wzdt');if(o&&!o.hidden)
  if((e.key==='Enter'||e.key===' ')&&e.target.matches&&e.target.matches('#ol [data-wi]')){e.preventDefault();openItem(+e.target.dataset.wi,e.target)}},true);
 async function spin(free){
  var p=P[S.cur];if(S.busy)return;Snd.init();
+ if(!free&&guestGate())return;
  if(!free&&S.bal<p.p){$('mc').classList.remove('won');$('res').innerHTML='<b>Not enough funds.</b> <button class="btn g" data-act="gofunds">Add funds</button>';Snd.err();return}
  S.busy=true;setBtns(true);
  var srv=null;
@@ -2204,6 +2206,7 @@ function side(el,it,r,w){el.className='side'+(w?' w':'');el.innerHTML='<div clas
 function resetBattle(){$('b1').className='side';$('b2').className='side';$('b1').innerHTML='<div class="e">'+ic('crown')+'</div><div class="big">You</div>';$('b2').innerHTML='<div class="e">'+ic('case')+'</div><div class="big">Bot</div>'}
 $('bsel').innerHTML=P.map(function(p,k){return '<option value="'+k+'">'+p.n+' · $'+fmt(p.p)+'</option>'}).join('');
 $('bgo').onclick=async function(){var p=P[+$('bsel').value];if(S.busy)return;Snd.init();
+ if(guestGate())return;
  if(S.bal<p.p){toast('Not enough funds yet. Add funds and try again.');Snd.err();return}
  S.busy=true;$('bgo').disabled=true;var bs=null;
  if(SRV()){var bx=await srvPost('/api/battle',{box:p.n});if(!(bx.s===200&&bx.j.ok)){S.busy=false;$('bgo').disabled=false;toast(bx.j.error||'Something went wrong. Please try again.');Snd.err();return}bs=bx.j;if(window.walletApply)walletApply(bs.wallet,0)}
@@ -2627,7 +2630,7 @@ function act(b){var a=b.dataset.act;
  if(a==='am'){S.am=b.dataset.am;S.aerr='';renderAuth();return}
  if(a==='eye'){var pi=b.parentNode.querySelector('input');var sh=pi.type==='password';pi.type=sh?'text':'password';b.textContent=sh?'Hide':'Show';b.setAttribute('aria-label',sh?'Hide password':'Show password');return}
  if(a==='aav'){S.sa=b.dataset.k;document.querySelectorAll('.avp button').forEach(function(x){x.classList.toggle('on',x===b)});return}
- if(a==='resetall'){if(confirm('Reset your balance, items, history and settings?')){S.bal=1000;S.inv=[];S.hist=[];S.daily=0;S.stats={opens:0,spent:0,won:0,sold:0,best:null};S.set={sound:true,vol:.6,fast:false,drops:true,ui:true};Snd.on=true;Snd.vol=.6;Snd.ui=true;toast('Demo data reset');refresh()}return}
+ if(a==='resetall'){if(confirm('Reset your balance, items, history and settings?')){S.bal=0;S.inv=[];S.hist=[];S.daily=0;S.stats={opens:0,spent:0,won:0,sold:0,best:null};S.set={sound:true,vol:.6,fast:false,drops:true,ui:true};Snd.on=true;Snd.vol=.6;Snd.ui=true;toast('Demo data reset');refresh()}return}
 }
 document.addEventListener('input',function(e){var s=e.target;if(s.id==='au-p'&&$('pwm')){var sc=pwScore(s.value);$('pwm').dataset.s=sc;var pl=$('pwl');if(pl){pl.textContent=sc?['','Weak. Add more characters.','Okay. Add a number or capital.','Good','Strong'][sc]:'Use 8 or more characters. Mix in numbers and capitals to make it stronger.';pl.className='mlab s'+sc}}if(s.id==='au-n'||s.id==='au-e'){s.dataset.t=s.id==='au-n'?'1':s.dataset.t;liveHint(s)}if(s.closest&&s.closest('#af')){var bw=$(s.id+'-w');if(bw)bw.classList.remove('bad')}if(s.classList&&s.classList.contains('cps')){var q=s.value.trim().toLowerCase().replace(/^\+/,'');s.parentNode.querySelectorAll('.cpl button').forEach(function(x){x.hidden=q&&x.dataset.sq.indexOf(q)<0})}});
 document.addEventListener('change',function(e){var t=e.target;
@@ -3790,6 +3793,7 @@ function crTick(now){if(CR.st!=='fly')return;var t=Math.max(0,(now-CR.t0)/1000);
 function crRefund(){if(CR.st!=='start')return;clearTimeout(CR.cdt);if(CR.srv){srvPost('/api/crash/cancel',{}).then(function(x){if(x.j&&x.j.wallet&&window.walletApply)walletApply(x.j.wallet,0)});CR.srv=null}else{addBal(CR.bet);log('win','Flying Roadster bet returned',CR.bet);renderTop();save()}CR.st='idle';crSet('','');var m=$('crmsg');if(m){m.textContent='Bet returned. Place your bet to take off';m.className='crmsg'}crUi()}
 async function crStart(){if(CR.st==='fly'||CR.st==='start')return;var bet=Math.round((+$('crb').value||0)*100)/100,au=+$('cra').value||0;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return}
+ if(guestGate())return;
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return}
  if(au&&au<1.01){toast('Auto eject needs to be 1.01x or more.');Snd.err();return}
  CR.st='start';CR.b=bet;CR.cd=3;crUi();CR.srv=null;
@@ -3899,6 +3903,7 @@ function plMsg(t,c){var m=$('plmsg');if(m){m.textContent=t;m.className='crmsg'+(
 async function plDrop(){var bet=Math.round((+$('plb').value||0)*100)/100;
  if(PL.air>=12)return false;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return false}
+ if(guestGate())return false;
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return false}
  var srv=null,pend,path;
  if(SRV()){PL.bet=bet;PL.air++;plUi();var x=await srvPost('/api/plinko/drop',{bet:bet,rows:PL.rows,risk:PL.risk});if(!(x.s===200&&x.j.ok)){PL.air=Math.max(0,PL.air-1);plUi();toast(x.j.error||'Something went wrong. Please try again.');Snd.err();return false}
@@ -4125,6 +4130,7 @@ function ghResetBoard(){document.querySelectorAll('#ghbd .ght').forEach(function
 /* ---- game ---- */
 async function ghStart(){if(GH.st==='play'||GH.busy)return;var bet=Math.round((+$('ghb').value||0)*100)/100;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return}
+ if(guestGate())return;
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return}
  GH.busy=1;GH.bet=bet;
  if(SRV()){ghResetBoard();ghUi();var x=await srvPost('/api/gem/start',{bet:bet,mines:GH.mines});if(!(x.s===200&&x.j.ok)){GH.busy=0;toast(x.j.error||'Something went wrong. Please try again.');Snd.err();ghUi();return}
@@ -4259,6 +4265,7 @@ function wwMsg(t,c){var m=$('wwmsg');if(m){m.textContent=t;m.className='crmsg'+(
 /* ---- game ---- */
 async function wwSpin(){if(WW.st==='spin'||WW.busy)return;var bet=Math.round((+$('wwb').value||0)*100)/100;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return}
+ if(guestGate())return;
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return}
  WW.busy=1;WW.bet=bet;var pend,idx,mult;
  if(SRV()){var x=await srvPost('/api/wheel/spin',{bet:bet,n:WW.n,risk:WW.risk});if(!(x.s===200&&x.j.ok)){WW.busy=0;toast(x.j.error||'Something went wrong. Please try again.');Snd.err();return}
