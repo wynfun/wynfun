@@ -4,10 +4,11 @@
   wyn-api serve <live|staging>        run the API (started by systemd)
   wyn-api setup <live|staging|both>   create / reset the admin login
 
+Players: sign up / log in / saved game state (sqlite file per site).
 Admin login = username + password + 6-digit code from an authenticator app.
 Passwords are stored only as a salted scrypt hash. Nothing secret is in GitHub.
 """
-import base64, getpass, hashlib, hmac, json, os, secrets, shutil, struct, subprocess, sys, threading, time
+import base64, getpass, hashlib, hmac, json, os, re, secrets, shutil, sqlite3, struct, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORTS = {"live": 8081, "staging": 8082}
@@ -74,6 +75,207 @@ class Guard:
         self.ip.pop(ip, None)
 
 
+# ---------- players ----------
+PCOOKIE = "__Host-wyn_player"
+PSESSION_IDLE = 30 * 24 * 3600
+PSESSION_MAX = 90 * 24 * 3600
+NAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,30}$")
+RESERVED = {"admin", "administrator", "support", "wyn", "wynfun", "staff", "team", "moderator", "mod", "system", "root", "help", "official", "guest"}
+STATE_KEYS = ("bal", "inv", "hist", "daily", "stats", "user", "set")
+STATE_MAX = 400 * 1024
+
+
+class Limiter:
+    """n tries per window seconds for a key (in memory)."""
+    def __init__(self, n, window):
+        self.n, self.w, self.d = n, window, {}
+
+    def hit(self, key):
+        now = time.time()
+        v = [t for t in self.d.get(key, []) if now - t < self.w]
+        self.d[key] = v
+        if len(v) >= self.n:
+            return False
+        v.append(now)
+        return True
+
+    def peek(self, key):
+        now = time.time()
+        return len([t for t in self.d.get(key, []) if now - t < self.w]) < self.n
+
+    def clear(self, key):
+        self.d.pop(key, None)
+
+
+class Players:
+    def __init__(self, folder):
+        self.path = os.path.join(folder, "players.sqlite")
+        self.signup_lim = Limiter(5, 3600)
+        self.login_ip = Limiter(10, 900)
+        self.login_id = Limiter(10, 900)
+        self.name_lim = Limiter(60, 600)
+        db = self.db()
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS players(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, name_l TEXT NOT NULL UNIQUE,
+          email TEXT NOT NULL UNIQUE, salt BLOB NOT NULL, hash BLOB NOT NULL, created REAL NOT NULL,
+          last_login REAL, state TEXT, ver INTEGER NOT NULL DEFAULT 0, upd REAL, banned INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS psessions(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, idle REAL NOT NULL, mx REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS ps_pid ON psessions(pid);
+        """)
+        db.commit()
+        db.close()
+        try:
+            os.chmod(self.path, 0o600)
+        except Exception:
+            pass
+
+    def db(self):
+        c = sqlite3.connect(self.path, timeout=10)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL")
+        return c
+
+    def signup(self, name, email, password, state):
+        name, email = name.strip(), email.strip().lower()
+        if not NAME_RE.match(name):
+            return None, "Username needs 3 to 20 letters, numbers or underscores."
+        if name.lower() in RESERVED:
+            return None, "That username is not available. Try another one."
+        if not EMAIL_RE.match(email):
+            return None, "Please enter a valid email address."
+        if len(password) < 8:
+            return None, "Your password needs at least 8 characters."
+        if len(password) > 200:
+            return None, "That password is too long."
+        salt = secrets.token_bytes(16)
+        h = scrypt(password, salt)
+        st = clean_state(state)
+        now = time.time()
+        db = self.db()
+        try:
+            if db.execute("SELECT 1 FROM players WHERE email=?", (email,)).fetchone():
+                return None, "That email already has an account. Try logging in."
+            if db.execute("SELECT 1 FROM players WHERE name_l=?", (name.lower(),)).fetchone():
+                return None, "That username is taken. Try another one."
+            cur = db.execute("INSERT INTO players(name,name_l,email,salt,hash,created,last_login,state,ver,upd) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                             (name, name.lower(), email, salt, h, now, now, json.dumps(st) if st else None, 1 if st else 0, now))
+            db.commit()
+            return cur.lastrowid, None
+        except sqlite3.IntegrityError:
+            return None, "That username or email is already used."
+        finally:
+            db.close()
+
+    def check_login(self, ident, password):
+        ident = ident.strip().lower()
+        db = self.db()
+        try:
+            r = db.execute("SELECT * FROM players WHERE email=? OR name_l=?", (ident, ident)).fetchone()
+            salt = bytes(r["salt"]) if r else b"\0" * 16
+            h = scrypt(password, salt)
+            if r and not r["banned"] and hmac.compare_digest(h, bytes(r["hash"])):
+                db.execute("UPDATE players SET last_login=? WHERE id=?", (time.time(), r["id"]))
+                db.commit()
+                return r["id"]
+            return None
+        finally:
+            db.close()
+
+    def new_session(self, pid):
+        tok = secrets.token_urlsafe(32)
+        now = time.time()
+        db = self.db()
+        db.execute("DELETE FROM psessions WHERE idle<? OR mx<?", (now, now))
+        db.execute("INSERT INTO psessions(h,pid,idle,mx) VALUES(?,?,?,?)", (sha(tok), pid, now + PSESSION_IDLE, now + PSESSION_MAX))
+        db.commit()
+        db.close()
+        return tok
+
+    def session_player(self, tok):
+        if not tok:
+            return None
+        now = time.time()
+        db = self.db()
+        try:
+            s = db.execute("SELECT * FROM psessions WHERE h=?", (sha(tok),)).fetchone()
+            if not s or s["idle"] < now or s["mx"] < now:
+                return None
+            p = db.execute("SELECT * FROM players WHERE id=? AND banned=0", (s["pid"],)).fetchone()
+            if not p:
+                return None
+            db.execute("UPDATE psessions SET idle=? WHERE h=?", (min(now + PSESSION_IDLE, s["mx"]), s["h"]))
+            db.commit()
+            return dict(p)
+        finally:
+            db.close()
+
+    def end_session(self, tok):
+        db = self.db()
+        db.execute("DELETE FROM psessions WHERE h=?", (sha(tok or ""),))
+        db.commit()
+        db.close()
+
+    def name_free(self, name):
+        n = name.strip().lower()
+        if not NAME_RE.match(name.strip()) or n in RESERVED:
+            return False
+        db = self.db()
+        try:
+            return db.execute("SELECT 1 FROM players WHERE name_l=?", (n,)).fetchone() is None
+        finally:
+            db.close()
+
+    def save_state(self, pid, state, ver):
+        st = clean_state(state)
+        if not st:
+            return False, None, None
+        db = self.db()
+        try:
+            cur = db.execute("UPDATE players SET state=?, ver=ver+1, upd=? WHERE id=? AND ver=?", (json.dumps(st), time.time(), pid, ver))
+            db.commit()
+            if cur.rowcount == 1:
+                return True, ver + 1, None
+            r = db.execute("SELECT state, ver FROM players WHERE id=?", (pid,)).fetchone()
+            return False, r["ver"], (json.loads(r["state"]) if r["state"] else None)
+        finally:
+            db.close()
+
+    def public(self, p):
+        return {"name": p["name"], "email": p["email"], "created": p["created"],
+                "state": json.loads(p["state"]) if p["state"] else None, "ver": p["ver"]}
+
+    def listing(self):
+        db = self.db()
+        try:
+            out = []
+            for r in db.execute("SELECT * FROM players ORDER BY created DESC LIMIT 5000"):
+                st = json.loads(r["state"]) if r["state"] else {}
+                stats = st.get("stats") or {}
+                out.append({"id": r["id"], "name": r["name"], "email": r["email"], "created": r["created"], "last_login": r["last_login"],
+                            "bal": st.get("bal"), "opens": stats.get("opens"), "spent": stats.get("spent"), "won": stats.get("won"), "banned": bool(r["banned"]),
+                            "name_": r["name"], "state": st or None})
+            return out
+        finally:
+            db.close()
+
+
+def clean_state(st):
+    """Keep only the game fields we know, and refuse silly sizes or values."""
+    if not isinstance(st, dict):
+        return None
+    out = {k: st[k] for k in STATE_KEYS if k in st}
+    bal = out.get("bal")
+    if not isinstance(bal, (int, float)) or isinstance(bal, bool) or bal != bal or bal < 0 or bal > 1e9:
+        return None
+    if len(json.dumps(out)) > STATE_MAX:
+        return None
+    if isinstance(out.get("user"), dict):
+        out["user"] = {k: v for k, v in out["user"].items() if k not in ("email",)}
+    return out
+
+
 class App:
     def __init__(self, env):
         self.env = env
@@ -82,6 +284,7 @@ class App:
         self.admin_file = os.path.join(self.dir, "admin.json")
         self.sess_file = os.path.join(self.dir, "sessions.json")
         self.guard = Guard()
+        self.players = Players(self.dir)
 
     # sessions are stored hashed, so a leaked file cannot be used to sign in
     def sessions(self):
@@ -178,6 +381,20 @@ class H(BaseHTTPRequestHandler):
         c = "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict" % (COOKIE, val, max_age)
         return c if INSECURE else c + "; Secure"
 
+    def pcookie_val(self):
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == PCOOKIE:
+                return v
+        return ""
+
+    def set_pcookie(self, val, max_age):
+        c = "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax" % (PCOOKIE, val, max_age)
+        return c if INSECURE else c + "; Secure"
+
+    def admin_ok(self):
+        return self.server.app.check_session(self.cookie_val())
+
     def same_origin(self):
         o = self.headers.get("Origin")
         if not o:
@@ -191,6 +408,19 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"ok": app.check_session(self.cookie_val())})
         if self.path == "/api/health":
             return self.send(200, {"ok": True, "env": app.env})
+        if self.path == "/api/me":
+            p = app.players.session_player(self.pcookie_val())
+            return self.send(200, {"api": True, "user": app.players.public(p) if p else None})
+        if self.path.startswith("/api/name?"):
+            if not app.players.name_lim.hit(self.ip()):
+                return self.send(429, {"error": "slow down"})
+            from urllib.parse import urlparse, parse_qs
+            n = (parse_qs(urlparse(self.path).query).get("n") or [""])[0][:40]
+            return self.send(200, {"free": app.players.name_free(n)})
+        if self.path == "/api/admin/players":
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, {"players": app.players.listing()})
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -199,7 +429,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(403, {"error": "blocked"})
         try:
             n = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
+            body = json.loads(self.rfile.read(min(n, 450 * 1024)) or b"{}")
         except Exception:
             return self.send(400, {"error": "bad request"})
         if self.path == "/api/admin/login":
@@ -214,6 +444,48 @@ class H(BaseHTTPRequestHandler):
             app.guard.ok(ip)
             tok = app.new_session()
             return self.send(200, {"ok": True}, self.set_cookie(tok, SESSION_MAX))
+        if self.path == "/api/signup":
+            ip = self.ip()
+            if not app.players.signup_lim.hit(ip):
+                return self.send(429, {"error": "Too many new accounts from this connection. Please try again later."})
+            pid, err = app.players.signup(str(body.get("name", ""))[:40], str(body.get("email", ""))[:260], str(body.get("password", ""))[:300], body.get("state"))
+            if err:
+                return self.send(400, {"error": err})
+            tok = app.players.new_session(pid)
+            p = app.players.session_player(tok)
+            return self.send(200, {"ok": True, "user": app.players.public(p)}, self.set_pcookie(tok, PSESSION_MAX))
+        if self.path == "/api/login":
+            ip = self.ip()
+            ident = str(body.get("id", ""))[:260].strip().lower()
+            if not app.players.login_ip.peek(ip) or not app.players.login_id.peek(ident):
+                return self.send(429, {"error": "Too many tries. Please wait 15 minutes."})
+            pid = app.players.check_login(ident, str(body.get("password", ""))[:300])
+            if not pid:
+                app.players.login_ip.hit(ip)
+                app.players.login_id.hit(ident)
+                time.sleep(0.5)
+                return self.send(401, {"error": "That email, username or password is not right."})
+            app.players.login_id.clear(ident)
+            tok = app.players.new_session(pid)
+            p = app.players.session_player(tok)
+            return self.send(200, {"ok": True, "user": app.players.public(p)}, self.set_pcookie(tok, PSESSION_MAX))
+        if self.path == "/api/logout":
+            app.players.end_session(self.pcookie_val())
+            return self.send(200, {"ok": True}, self.set_pcookie("", 0))
+        if self.path == "/api/state":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            try:
+                ver = int(body.get("ver"))
+            except Exception:
+                return self.send(400, {"error": "bad request"})
+            ok, nver, other = app.players.save_state(p["id"], body.get("state"), ver)
+            if ok:
+                return self.send(200, {"ok": True, "ver": nver})
+            if nver is None:
+                return self.send(400, {"error": "bad state"})
+            return self.send(409, {"error": "newer", "ver": nver, "state": other})
         if self.path == "/api/admin/logout":
             app.end_session(self.cookie_val())
             return self.send(200, {"ok": True}, self.set_cookie("", 0))
