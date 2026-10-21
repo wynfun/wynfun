@@ -2212,8 +2212,8 @@ function load(){try{var o=JSON.parse(localStorage.getItem(KEY)||'null');if(o&&o.
 function put(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
 function who(){return S.acct||''}
 function th(em,make){var o=load(),t=o.t[em];if(!t&&make){t=o.t[em]={em:em,n:(S.user&&S.user.name)||em.split('@')[0],mode:'ai',msgs:[],upd:Date.now(),ru:0,ra:0}}return{o:o,t:t}}
-function save(o){put(o)}
-function say(t,f,x,extra){var m={f:f,t:Date.now(),x:x};if(extra)for(var k in extra)m[k]=extra[k];t.msgs.push(m);t.upd=m.t;if(t.msgs.length>200)t.msgs=t.msgs.slice(-200);return m}
+function save(o){put(o);syncSoon()}
+function say(t,f,x,extra){var m={f:f,t:Date.now(),x:x,c:Math.random().toString(36).slice(2,9)};if(extra)for(var k in extra)m[k]=extra[k];t.msgs.push(m);t.upd=m.t;if(t.msgs.length>200)t.msgs=t.msgs.slice(-200);return m}
 var HELLO='Hi! I\'m the wyn.fun assistant. I\'m an automatic helper, not a person. I can answer questions about boxes, funds, withdrawals, shipping and fairness. If you\'d rather talk to someone, tap "Talk to a person" and our team will reply here.';
 var CHIPS=['How do boxes work?','Is this real money?','How do I add funds?','How do withdrawals work?','How do I ship an item?','Is it fair?'];
 /* help answers: [id, patterns(weight), answer, links, offerPerson] */
@@ -2317,10 +2317,38 @@ function send(txt){txt=String(txt||'').trim().slice(0,500);if(!txt||busy)return;
   if(r.human){y.t.mode='wait';y.t.ra=(y.t.ra||0)+1;say(y.t,'b','Of course. I\'ll pass this to our team. A person will reply here.');say(y.t,'s','You asked for a person. Our team has been told. They will reply here, so you can keep this page open or come back later.')}
   else say(y.t,'b',r.x,{links:r.links,offer:r.offer});
   save(y.o);repaint();notifyAdmin()},650+Math.min(900,txt.length*12))}
+
+/* ---- keeps the chat the same on every device (needs the wyn.fun server) ---- */
+var PS={busy:0,tm:0,tick:0},AS={busy:0};
+function syncSoon(){if(typeof WAPI==='undefined'||!WAPI.ok)return;clearTimeout(PS.tm);PS.tm=setTimeout(function(){pSync();aSync()},700)}
+function sj(u,b){return fetch(u,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{s:r.status,j:j}})})}
+function pSync(){if(PS.busy||typeof WAPI==='undefined'||!(WAPI.ok&&WAPI.me&&who()))return;var em=who(),o=load(),t=o.t[em],seq=t?(t.seq||0):0,add=[],cids={},mode=null,read=false,ru0=t?(t.ru||0):0;
+ if(t){t.msgs.forEach(function(m){if(!m.sid&&!m.ad&&m.f!=='a'){add.push({f:m.f,t:m.t,x:m.x,extra:(m.links||m.offer)?{links:m.links,offer:m.offer}:undefined});cids[m.c||'']=1}});if(t.mode!==(t.smode||'ai'))mode=t.mode;if(!t.ru&&(t.sru||0)>0)read=true}
+ PS.busy=1;sj('/api/chat/sync',{seq:seq,add:add,mode:mode,read:read}).then(function(x){PS.busy=0;var j=x.j;if(x.s!==200||j.unchanged)return;
+  var o2=load(),t2=o2.t[em];if(!t2)t2=o2.t[em]={em:em,n:(S.user&&S.user.name)||em.split('@')[0],mode:'ai',msgs:[],upd:Date.now(),ru:0,ra:0};
+  var keep=t2.msgs.filter(function(m){return !m.sid&&!(m.c&&cids[m.c])&&!(!m.ad&&m.f!=='a'&&!m.c&&add.length)});
+  var before=t2.msgs.length;t2.msgs=j.msgs.concat(keep);
+  var sent=mode===null?(t2.smode||'ai'):mode;if(t2.mode===sent)t2.mode=j.mode;t2.smode=j.mode;
+  if(ru0>0&&!(t2.ru||0)&&!read){t2.sru=j.ru}else{t2.ru=j.ru;t2.sru=j.ru}
+  t2.ra=j.ra;t2.seq=j.seq;if(t2.msgs.length)t2.upd=t2.msgs[t2.msgs.length-1].t;put(o2);
+  try{window.dispatchEvent(new CustomEvent('wchat',{detail:{from:'agent'}}))}catch(e){}
+  if(keep.some(function(m){return !m.sid}))syncSoon()},function(){PS.busy=0})}
+function aSync(){if(!window.WADM||AS.busy)return;var o=load(),add=[],modes={},cids={},me=who();
+ Object.keys(o.t).forEach(function(em){var t=o.t[em];if(!t||em===me||!t.adm)return;t.msgs.forEach(function(m){if(!m.sid&&m.ad){add.push({em:em,f:m.f,t:m.t,x:m.x});cids[m.c]=1}});if(t.mode!==(t.smode||'ai'))modes[em]=t.mode});
+ AS.busy=1;sj('/api/admin/chat/sync',{since:o.aseq||0,add:add,modes:modes}).then(function(x){AS.busy=0;var j=x.j;if(x.s!==200||!j.threads)return;
+  var o2=load(),ch=false;j.threads.forEach(function(s){var em=s.em;if(em===me)return;var t=o2.t[em];if(!t)t=o2.t[em]={em:em,n:s.n,mode:'ai',msgs:[],upd:Date.now(),ru:0,ra:0};
+   var keep=t.msgs.filter(function(m){return !m.sid&&!(m.c&&cids[m.c])});t.msgs=s.msgs.concat(keep);
+   var sent=(modes[em]!==undefined)?modes[em]:(t.smode||'ai');if(t.mode===sent)t.mode=s.mode;t.smode=s.mode;t.n=s.n;t.ru=s.ru;t.ra=s.ra;t.seq=s.seq;t.adm=1;if(t.msgs.length)t.upd=t.msgs[t.msgs.length-1].t;ch=true});
+  o2.aseq=Math.max(o2.aseq||0,j.seq||0);put(o2);if(ch){try{window.dispatchEvent(new CustomEvent('wchat',{detail:{from:'user'}}))}catch(e){}}
+  var more=false;Object.keys(o2.t).forEach(function(k){(o2.t[k].msgs||[]).forEach(function(m){if(!m.sid&&m.ad)more=true})});if(more)syncSoon()},function(){AS.busy=0})}
+setInterval(function(){if(typeof WAPI==='undefined'||!WAPI.ok||document.hidden)return;PS.tick++;
+ var ad=document.getElementById('adm');if(window.WADM&&ad&&!ad.hidden)aSync();
+ if(WAPI.me&&who()){var onChat=S.view==='account'&&S.tab==='support';if(onChat||PS.tick%6===0)pSync()}},4000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden){pSync();aSync()}});
 /* ---- admin side ---- */
 function threads(){var o=load(),out=[];Object.keys(o.t).forEach(function(k){var t=o.t[k];if(t&&t.mode!=='ai'||t&&t.msgs.some(function(m){return m.f==='a'}))out.push(t)});return out}
-function agentReply(em,txt){var o=load(),t=o.t[em];if(!t)return false;t.mode=t.mode==='closed'?'closed':'human';say(t,'a',String(txt).slice(0,1000));t.ru=(t.ru||0)+1;t.ra=0;save(o);ping();return true}
-function setMode(em,m){var o=load(),t=o.t[em];if(!t)return;t.mode=m;say(t,'s',m==='closed'?'Our team closed this chat. Send a message any time to start a new one.':'Our team reopened this chat.');if(m!=='closed')t.ru=(t.ru||0)+1;save(o);ping()}
+function agentReply(em,txt){var o=load(),t=o.t[em];if(!t)return false;t.mode=t.mode==='closed'?'closed':'human';say(t,'a',String(txt).slice(0,1000),{ad:1});t.ru=(t.ru||0)+1;t.ra=0;save(o);ping();return true}
+function setMode(em,m){var o=load(),t=o.t[em];if(!t)return;t.mode=m;say(t,'s',m==='closed'?'Our team closed this chat. Send a message any time to start a new one.':'Our team reopened this chat.',{ad:1});if(m!=='closed')t.ru=(t.ru||0)+1;save(o);ping()}
 function notifyAdmin(){try{window.dispatchEvent(new CustomEvent('wchat',{detail:{from:'user'}}))}catch(e){}}
 function ping(){try{window.dispatchEvent(new CustomEvent('wchat',{detail:{from:'agent'}}))}catch(e){}}
 function onChange(from){var em=who();if(!em){return}var x=th(em,false),t=x.t;if(!t)return;
@@ -2797,7 +2825,7 @@ function wlgHide(){if(WLG)WLG.hidden=true;if(location.hash==='#admin')history.re
 function wlgOut(){var t=document.querySelector('#adm .ax-sf');if(!t||document.getElementById('wlo'))return;wlgCss();var b=document.createElement('button');b.id='wlo';b.type='button';b.textContent='Log out';b.addEventListener('click',function(){fetch('/api/admin/logout',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}'}).finally(function(){location.href=location.pathname})});t.appendChild(b)}
 var WPL=[];
 function accAll(){var o=accGet();if(!WPL.length)return o;var a=Object.assign({},o.a),s=Object.assign({},o.s);WPL.forEach(function(p){var em=p.email,st=p.state||{};a[em]={n:p.name,e:em};s[em]=Object.assign({},st,{user:Object.assign({},st.user||{},{since:Math.round(p.created*1000)})})});return{a:a,s:s}}
-function openAdmin(pg){var go=function(){fetch('/api/admin/players',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{}}).then(function(j){WPL=j.players||[]},function(){}).then(function(){openAdminReal(pg);wlgOut()})};fetch('/api/admin/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{ok:false,down:1}}).then(function(j){if(j&&j.ok)go();else wlgShow(go,j&&j.down)}).catch(function(){wlgShow(go,1)})}
+function openAdmin(pg){var go=function(){window.WADM=1;fetch('/api/admin/players',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{}}).then(function(j){WPL=j.players||[]},function(){}).then(function(){openAdminReal(pg);wlgOut()})};fetch('/api/admin/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{ok:false,down:1}}).then(function(j){if(j&&j.ok)go();else wlgShow(go,j&&j.down)}).catch(function(){wlgShow(go,1)})}
 function openAdminReal(pg){build();if(!ST.sd){ST.sd=1;var t=Date.now();[['Settings saved','Payment methods'],['Box "Raging Bull" updated','Price changed'],['Withdrawal W-9104 approved','$250'],['Player banned','chargeback'],['Promo code created','WELCOME10'],['Order O-2041 shipped','DHL']].forEach(function(x,i){ST.au.push({t:t-(i+1)*3.1*3600e3,a:x[0],x:x[1],w:i%2?'Finance team':'You'})});sv()}
  $a('adm').hidden=false;document.body.classList.add('ax-on');var side=$a('axSide');if(!side.dataset.ok){side.dataset.ok=1}show(pg||AX.page);$a('adm').focus({preventScroll:true})}
 function closeAdmin(){closeDr();$a('adm').hidden=true;$a('adm').classList.remove('menu');document.body.classList.remove('ax-on');publicRefresh();if(location.hash==='#admin')history.replaceState(null,'',location.pathname+location.search)}
