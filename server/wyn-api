@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""wyn.fun server API (no extra packages needed).
+
+  wyn-api serve <live|staging>        run the API (started by systemd)
+  wyn-api setup <live|staging|both>   create / reset the admin login
+
+Admin login = username + password + 6-digit code from an authenticator app.
+Passwords are stored only as a salted scrypt hash. Nothing secret is in GitHub.
+"""
+import base64, getpass, hashlib, hmac, json, os, secrets, shutil, struct, subprocess, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORTS = {"live": 8081, "staging": 8082}
+BASE = os.environ.get("WYN_DATA_BASE", "/var/lib/wyn")
+SESSION_IDLE = 12 * 3600          # sign out after 12 h of no use
+SESSION_MAX = 7 * 24 * 3600       # and always after 7 days
+COOKIE = "__Host-wyn_admin"
+INSECURE = os.environ.get("WYN_INSECURE") == "1"   # tests only (no https)
+LOCK = threading.Lock()
+
+
+# ---------- small helpers ----------
+def data_dir(env):
+    return os.path.join(BASE, env)
+
+def read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def write_json(path, obj, mode=0o600):
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+    os.chmod(path, mode)
+
+def scrypt(password, salt):
+    return hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+
+def totp(secret_b32, step):
+    key = base64.b32decode(secret_b32)
+    h = hmac.new(key, struct.pack(">Q", step), "sha1").digest()
+    o = h[-1] & 15
+    return "%06d" % ((struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF) % 1000000)
+
+def sha(s):
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+# ---------- login protection ----------
+class Guard:
+    """Slows down password guessing: per visitor and for the whole site."""
+    def __init__(self):
+        self.ip = {}
+        self.all = []
+
+    def blocked(self, ip):
+        now = time.time()
+        self.all = [t for t in self.all if now - t < 900]
+        v = [t for t in self.ip.get(ip, []) if now - t < 900]
+        self.ip[ip] = v
+        return len(v) >= 5 or len(self.all) >= 25
+
+    def fail(self, ip):
+        now = time.time()
+        self.ip.setdefault(ip, []).append(now)
+        self.all.append(now)
+
+    def ok(self, ip):
+        self.ip.pop(ip, None)
+
+
+class App:
+    def __init__(self, env):
+        self.env = env
+        self.dir = data_dir(env)
+        os.makedirs(self.dir, exist_ok=True)
+        self.admin_file = os.path.join(self.dir, "admin.json")
+        self.sess_file = os.path.join(self.dir, "sessions.json")
+        self.guard = Guard()
+
+    # sessions are stored hashed, so a leaked file cannot be used to sign in
+    def sessions(self):
+        now = time.time()
+        d = read_json(self.sess_file, {})
+        d = {k: v for k, v in d.items() if v["idle"] > now and v["max"] > now}
+        return d
+
+    def new_session(self):
+        tok = secrets.token_urlsafe(32)
+        now = time.time()
+        with LOCK:
+            d = self.sessions()
+            d[sha(tok)] = {"idle": now + SESSION_IDLE, "max": now + SESSION_MAX}
+            write_json(self.sess_file, d)
+        return tok
+
+    def check_session(self, tok):
+        if not tok:
+            return False
+        with LOCK:
+            d = self.sessions()
+            s = d.get(sha(tok))
+            if not s:
+                return False
+            s["idle"] = min(time.time() + SESSION_IDLE, s["max"])
+            write_json(self.sess_file, d)
+            return True
+
+    def end_session(self, tok):
+        with LOCK:
+            d = self.sessions()
+            d.pop(sha(tok or ""), None)
+            write_json(self.sess_file, d)
+
+    def login(self, user, password, code):
+        a = read_json(self.admin_file, None)
+        # always do the same work, so timing does not reveal what was wrong
+        salt = bytes.fromhex(a["salt"]) if a else b"\0" * 16
+        h = scrypt(password, salt)
+        good_pw = a is not None and hmac.compare_digest(h.hex(), a["hash"])
+        good_user = a is not None and hmac.compare_digest(user.strip().lower().encode(), a["user"].encode())
+        good_code = False
+        if a:
+            now_step = int(time.time() // 30)
+            code = "".join(ch for ch in code if ch.isdigit())
+            with LOCK:
+                a = read_json(self.admin_file, a)
+                for st in (now_step - 1, now_step, now_step + 1):
+                    if st > a.get("last", 0) and hmac.compare_digest(totp(a["totp"], st), code):
+                        good_code = True
+                        if good_pw and good_user:
+                            a["last"] = st          # a code works only once
+                            write_json(self.admin_file, a)
+                        break
+        return good_pw and good_user and good_code
+
+
+APPS = {}
+
+
+class H(BaseHTTPRequestHandler):
+    server_version = "wyn"
+    sys_version = ""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *a):
+        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % a))
+
+    def ip(self):
+        xf = self.headers.get("X-Forwarded-For", "")
+        return (xf.split(",")[0].strip() or self.client_address[0])
+
+    def send(self, code, obj, cookie=None):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def cookie_val(self):
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE:
+                return v
+        return ""
+
+    def set_cookie(self, val, max_age):
+        c = "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict" % (COOKIE, val, max_age)
+        return c if INSECURE else c + "; Secure"
+
+    def same_origin(self):
+        o = self.headers.get("Origin")
+        if not o:
+            return True
+        host = self.headers.get("Host", "")
+        return o.split("://", 1)[-1] == host
+
+    def do_GET(self):
+        app = self.server.app
+        if self.path == "/api/admin/me":
+            return self.send(200, {"ok": app.check_session(self.cookie_val())})
+        if self.path == "/api/health":
+            return self.send(200, {"ok": True, "env": app.env})
+        self.send(404, {"error": "not found"})
+
+    def do_POST(self):
+        app = self.server.app
+        if not self.same_origin() or "json" not in self.headers.get("Content-Type", ""):
+            return self.send(403, {"error": "blocked"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(min(n, 4096)) or b"{}")
+        except Exception:
+            return self.send(400, {"error": "bad request"})
+        if self.path == "/api/admin/login":
+            ip = self.ip()
+            if app.guard.blocked(ip):
+                return self.send(429, {"error": "Too many tries. Please wait 15 minutes."})
+            ok = app.login(str(body.get("user", ""))[:100], str(body.get("password", ""))[:200], str(body.get("code", ""))[:20])
+            if not ok:
+                app.guard.fail(ip)
+                time.sleep(0.6)
+                return self.send(401, {"error": "Those details are not right. Check the username, password and the 6-digit code."})
+            app.guard.ok(ip)
+            tok = app.new_session()
+            return self.send(200, {"ok": True}, self.set_cookie(tok, SESSION_MAX))
+        if self.path == "/api/admin/logout":
+            app.end_session(self.cookie_val())
+            return self.send(200, {"ok": True}, self.set_cookie("", 0))
+        self.send(404, {"error": "not found"})
+
+
+def serve(env):
+    port = int(os.environ.get("WYN_PORT") or PORTS[env])
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    srv.app = App(env)
+    print("wyn-api %s listening on 127.0.0.1:%d" % (env, port), flush=True)
+    srv.serve_forever()
+
+
+# ---------- one-time admin setup (run by you on the server) ----------
+def setup(which):
+    envs = ["live", "staging"] if which == "both" else [which]
+    print("\nCreate the admin login for: %s\n" % " + ".join(envs))
+    user = (input("Admin username (e.g. admin): ").strip().lower() or "admin")
+    while True:
+        p1 = getpass.getpass("Choose a password (min 12 characters): ")
+        p2 = getpass.getpass("Type it again: ")
+        if p1 == p2 and len(p1) >= 12:
+            break
+        print("They did not match or were too short. Try again.")
+    secret = base64.b32encode(secrets.token_bytes(20)).decode()
+    uri = "otpauth://totp/wyn.fun%%20admin:%s?secret=%s&issuer=wyn.fun" % (user, secret)
+    print("\nOn your PHONE, open an authenticator app (Google Authenticator, Microsoft Authenticator or Authy),")
+    print("tap  +  then  Scan a QR code, and scan this:\n")
+    if shutil.which("qrencode"):
+        subprocess.call(["qrencode", "-t", "ANSIUTF8", "-m", "2", uri])
+    print("\nCannot scan? Add it by typing this key instead:  %s\n" % " ".join(secret[i:i + 4] for i in range(0, len(secret), 4)))
+    while True:
+        c = input("Type the 6-digit code your app shows now: ").strip().replace(" ", "")
+        if any(hmac.compare_digest(totp(secret, int(time.time() // 30) + d), c) for d in (-1, 0, 1)):
+            break
+        print("That code is not right (they change every 30 seconds). Try the new one.")
+    salt = secrets.token_bytes(16)
+    for env in envs:
+        d = data_dir(env)
+        os.makedirs(d, exist_ok=True)
+        write_json(os.path.join(d, "admin.json"), {"user": user, "salt": salt.hex(), "hash": scrypt(p1, salt).hex(), "totp": secret, "last": int(time.time() // 30)})
+        write_json(os.path.join(d, "sessions.json"), {})        # signs out every old session
+        try:
+            import pwd
+            u = pwd.getpwnam("wynapi")
+            for f in ("admin.json", "sessions.json"):
+                os.chown(os.path.join(d, f), u.pw_uid, u.pw_gid)
+            os.chown(d, u.pw_uid, u.pw_gid)
+        except Exception:
+            pass
+    print("\nDone. Admin login saved for: %s. Open https://wyn.fun/#admin to try it.\n" % ", ".join(envs))
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if len(a) == 2 and a[0] == "serve" and a[1] in PORTS:
+        serve(a[1])
+    elif len(a) == 2 and a[0] == "setup" and a[1] in ("live", "staging", "both"):
+        setup(a[1])
+    else:
+        print(__doc__)
+        sys.exit(2)

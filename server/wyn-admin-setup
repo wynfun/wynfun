@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Create or reset the admin login:   wyn-admin-setup        (both sites)
+#                                    wyn-admin-setup staging | live
+exec /usr/local/bin/wyn-api setup "${1:-both}"
