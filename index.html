@@ -1711,7 +1711,7 @@ button,a,select,summary,[role=button]{touch-action:manipulation}
 </main></div>
 
 <div class="ax" id="adm" hidden tabindex="-1" role="dialog" aria-modal="true" aria-label="Admin dashboard">
-<div class="ax-side" id="axSide"><div class="ax-brand"><b>wyn<i>.</i>fun</b><em>ADMIN</em></div><div id="axNav" role="navigation" aria-label="Admin sections"></div><div class="ax-sf"><div class="ax-demo"><b>Demo data.</b> Sample players and payments, plus any real accounts made in this browser. Changes are saved in this browser only.</div><button class="ax-b" data-x="back">Back to the site</button></div></div>
+<div class="ax-side" id="axSide"><div class="ax-brand"><b>wyn<i>.</i>fun</b><em>ADMIN</em></div><div id="axNav" role="navigation" aria-label="Admin sections"></div><div class="ax-sf"><div class="ax-demo"><b>Demo data.</b> Sample players and payments, plus real accounts created on this site. Admin changes are saved in this browser only for now.</div><button class="ax-b" data-x="back">Back to the site</button></div></div>
 <div class="ax-main"><header class="ax-top"><button class="ax-menu" data-x="menu" aria-label="Open menu"><svg class="axi" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><h1 id="axT">Overview</h1><div class="ax-sp"></div><span class="ax-pill">DEMO DATA</span><button class="ax-bell" id="axBell" data-x="bell" aria-label="Notifications" aria-expanded="false" aria-controls="axNt"><svg class="axi" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7M10 20a2 2 0 0 0 4 0"/></svg><span class="ax-bn" id="axBn" hidden></span></button><button class="ax-b" data-x="back">Exit admin</button><span class="ax-av" style="background:#4a2fb8" title="Admin">AD</span><div class="ax-nt" id="axNt" hidden role="region" aria-label="Notifications"></div></header><div class="ax-body" id="axBody"></div></div>
 <div class="ax-sr2" data-x="shade"></div><div class="ax-dim" id="axDim" hidden data-x="dim"></div><div class="ax-dr" id="axDr" hidden role="region" aria-label="Details"></div><input type="file" id="axFile" accept="image/*" hidden data-fi="file"><input type="file" id="axFileM" accept="image/*" multiple hidden data-fi="filem"><input type="file" id="axFileP" accept="image/*" multiple hidden data-fi="pics"><input type="file" id="axFileC" accept=".csv,.tsv,.txt,text/csv" hidden data-fi="impf"><div class="ax-ts" id="axTs" role="status" aria-live="polite"></div>
 </div>
@@ -1982,7 +1982,7 @@ var AK='wyn5acc';
 function accGet(){try{var o=JSON.parse(localStorage.getItem(AK)||'null');if(o&&o.a)return o}catch(e){}return{a:{},s:{}}}
 function accPut(o){try{localStorage.setItem(AK,JSON.stringify(o))}catch(e){}}
 function snap(){return{bal:S.bal,inv:S.inv,hist:S.hist,daily:S.daily,stats:S.stats,user:S.user,set:S.set}}
-function save(){try{var p=snap();p.acct=S.acct||null;localStorage.setItem('wyn5',JSON.stringify(p));if(S.acct){var o=accGet();o.s[S.acct]=snap();accPut(o)}}catch(e){}}
+function save(){try{var p=snap();p.acct=S.acct||null;localStorage.setItem('wyn5',JSON.stringify(p));if(S.acct){var o=accGet();o.s[S.acct]=snap();accPut(o)}}catch(e){}if(typeof WAPI!=='undefined'&&WAPI.push)WAPI.push()}
 function freshState(){S.bal=1000;S.inv=[];S.hist=[];S.daily=0;S.stats={opens:0,spent:0,won:0,sold:0,best:null};S.user={name:'Guest',email:'',color:'#8b5cff',since:Date.now(),guest:true};S.set={sound:true,vol:.6,fast:false,drops:true,ui:true};Snd.on=true;Snd.vol=.6;Snd.ui=true}
 function fmt(n){n=Number(n);return n.toLocaleString(undefined,n%1?{minimumFractionDigits:2,maximumFractionDigits:2}:{maximumFractionDigits:2})}
 var tt;function toast(m){var t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(tt);tt=setTimeout(function(){t.classList.remove('on')},2600)}
@@ -2356,24 +2356,43 @@ function renderAuth(){var m=S.am||'login',bx=HOTB.slice(0,3).map(function(n){ret
  $('auth').innerHTML='<div class="au">'+'<div class="aur">'+(m==='forgot'?'':sg)+h+''+'</div></div>';
  var fi=$(m==='signup'?'au-n':m==='forgot'?'au-e':'au-id');if(fi&&window.innerWidth>700)fi.focus()}
 function aerr(m){S.aerr=m;var e=$('aerr');if(e)e.textContent=m;Snd.err();document.querySelectorAll('.afi.bad').forEach(function(x){x.classList.remove('bad')});var ids=/not right|Enter your email or username/.test(m)?(S.am==='login'?['au-id','au-p']:['au-p']):/sername/.test(m)?['au-n']:/email|account with/i.test(m)?['au-e']:/assword/.test(m)?['au-p']:/18/.test(m)?['au-t']:[];ids.forEach(function(i){var w=$(i+'-w');if(w)w.classList.add('bad')});var f=ids[0]&&$(ids[0]);if(f&&f.focus)f.focus()}
-function liveHint(el){var id=el.id,h=$(id+'-h'),v=el.value.trim(),w=$(id+'-w');if(!h||S.am!=='signup'||(id!=='au-n'&&id!=='au-e'))return;if(w)w.classList.remove('bad');var msg='',ok=false;if(id==='au-n'&&v){if(!/^[A-Za-z0-9_]{3,20}$/.test(v))msg='Use 3 to 20 letters, numbers or _';else{var o=accGet();if(Object.keys(o.a).some(function(k){return o.a[k].n.toLowerCase()===v.toLowerCase()}))msg='That username is taken';else{msg='Looks good';ok=true}}}if(id==='au-e'&&v){if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)){var o2=accGet();if(o2.a[v.toLowerCase()])msg='That email already has an account';else{msg='Looks good';ok=true}}else if(el.dataset.t)msg='Check the email address'}h.textContent=msg;h.className='fh '+(msg?(ok?'ok':'no'):'')}
+function liveHint(el){var id=el.id,h=$(id+'-h'),v=el.value.trim(),w=$(id+'-w');if(!h||S.am!=='signup'||(id!=='au-n'&&id!=='au-e'))return;if(w)w.classList.remove('bad');var msg='',ok=false;if(id==='au-n'&&v){if(!/^[A-Za-z0-9_]{3,20}$/.test(v))msg='Use 3 to 20 letters, numbers or _';else{var o=accGet();if(Object.keys(o.a).some(function(k){return o.a[k].n.toLowerCase()===v.toLowerCase()}))msg='That username is taken';else{msg='Looks good';ok=true}}}if(id==='au-e'&&v){if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)){var o2=accGet();if(o2.a[v.toLowerCase()])msg='That email already has an account';else{msg='Looks good';ok=true}}else if(el.dataset.t)msg='Check the email address'}h.textContent=msg;h.className='fh '+(msg?(ok?'ok':'no'):'');if(WAPI.ok&&id==='au-n'&&ok)WAPI.nameCheck(v,h)}
+/* ---------- server accounts (used when the wyn.fun server is reachable) ---------- */
+var WAPI=(function(){
+ var W={ok:false,me:null,ver:0,mute:0},tm=0,busy=0,dirty=0,nt=0;
+ function J(m,u,b){return fetch(u,{method:m,credentials:'same-origin',cache:'no-store',keepalive:!!b&&m==='POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){j.status=r.status;return j})})}
+ function adopt(u){W.mute=1;try{var st=u.state;if(st){if(typeof st.bal==='number')S.bal=st.bal;S.inv=st.inv||[];S.hist=st.hist||[];S.daily=st.daily||0;S.stats=st.stats||S.stats;S.set=Object.assign(S.set,st.set||{});S.user=Object.assign({},S.user,st.user||{})}
+  S.acct=u.email;S.user.name=u.name;S.user.email=u.email;S.user.guest=false;if(!S.user.since)S.user.since=(u.created||0)*1000||Date.now();W.me=u;W.ver=u.ver||0;Snd.on=S.set.sound;Snd.vol=S.set.vol;Snd.ui=S.set.ui!==false;save()}finally{W.mute=0}}
+ W.ready=J('GET','/api/me').then(function(j){if(!j.api)return;W.ok=true;if(j.user){adopt(j.user);try{refresh()}catch(e){}}else if(S.acct){S.acct=null;freshState();save();try{refresh()}catch(e){}}},function(){});
+ W.push=function(){if(W.mute||!W.ok||!W.me||!S.acct)return;clearTimeout(tm);tm=setTimeout(W.pushNow,1500)};
+ W.pushNow=function(){clearTimeout(tm);tm=0;if(!W.ok||!W.me||!S.acct)return Promise.resolve();if(busy){dirty=1;return Promise.resolve()}busy=1;dirty=0;
+  return J('POST','/api/state',{state:snap(),ver:W.ver}).then(function(j){busy=0;if(j.status===200){W.ver=j.ver}else if(j.status===409&&j.state){adopt({name:W.me.name,email:W.me.email,created:W.me.created,state:j.state,ver:j.ver});toast('Updated from your other device');try{refresh()}catch(e){}}else if(j.status===401){W.me=null;S.acct=null;freshState();save();toast('You were signed out. Please log in again.');try{refresh()}catch(e){}}
+   if(dirty)W.push()},function(){busy=0;dirty=1})};
+ W.signup=function(n,em,pw){return J('POST','/api/signup',{name:n,email:em,password:pw,state:snap()}).then(function(j){if(!j.ok)return aerr(j.error||'Cannot reach the server right now. Please try again.');adopt(j.user);S.sa=null;Snd.win?Snd.sell():0;toast('Welcome to wyn.fun, '+n+'!');refresh();go('account','overview')},function(){aerr('Cannot reach the server right now. Please try again.')})};
+ W.login=function(id,pw){return J('POST','/api/login',{id:id,password:pw}).then(function(j){if(!j.ok)return aerr(j.error||'Cannot reach the server right now. Please try again.');adopt(j.user);Snd.sell();toast('Welcome back, '+S.user.name+'!');refresh();go('account','overview')},function(){aerr('Cannot reach the server right now. Please try again.')})};
+ W.logout=function(){if(!W.ok||!W.me)return;var p=W.pushNow();W.me=null;p.then(function(){return J('POST','/api/logout',{})},function(){})};
+ W.nameCheck=function(v,h){clearTimeout(nt);nt=setTimeout(function(){fetch('/api/name?n='+encodeURIComponent(v),{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){var el=$('au-n');if(j.free===false&&el&&el.value.trim()===v){h.textContent='That username is taken';h.className='fh no'}}).catch(function(){})},300)};
+ document.addEventListener('visibilitychange',function(){if(!W.ok||!W.me)return;if(document.hidden){W.pushNow();return}if(tm){W.pushNow();return}J('GET','/api/me').then(function(j){if(j.user&&j.user.ver>W.ver){adopt(j.user);toast('Updated from your other device');try{refresh()}catch(e){}}else if(j.api&&!j.user&&S.acct){W.me=null;S.acct=null;freshState();save();try{refresh()}catch(e){}}})});
+ window.addEventListener('pagehide',function(){W.pushNow()});
+ return W})();
 async function pwHash(salt,pw){return sha(salt+':'+pw)}
-async function authSubmit(){var m=S.am,o=accGet(),g=function(i){var e=$(i);return e?e.value.trim():''},pw=$('au-p')?$('au-p').value:'';
+async function authSubmit(){await WAPI.ready;var m=S.am,o=accGet(),g=function(i){var e=$(i);return e?e.value.trim():''},pw=$('au-p')?$('au-p').value:'';
  if(m==='signup'){var n=g('au-n'),em=g('au-e').toLowerCase();
   if(!/^[A-Za-z0-9_]{3,20}$/.test(n))return aerr('Username needs 3 to 20 letters, numbers or underscores.');
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em))return aerr('Please enter a valid email address.');
   if(pw.length<8)return aerr('Your password needs at least 8 characters.');
   if(!$('au-t').checked)return aerr('Please confirm you are 18 or older and accept the terms.');
+  if(WAPI.ok)return WAPI.signup(n,em,pw);
   if(o.a[em])return aerr('That email already has an account. Try logging in.');
   if(Object.keys(o.a).some(function(k){return o.a[k].n.toLowerCase()===n.toLowerCase()}))return aerr('That username is taken. Try another one.');
   var salt=rnd().slice(0,16);o.a[em]={n:n,e:em,s:salt,h:await pwHash(salt,pw),c:Date.now()};accPut(o);
   S.user=Object.assign({},S.user,{name:n,email:em,guest:false,since:Date.now()});S.acct=em;S.sa=null;save();Snd.win?Snd.sell():0;toast('Welcome to wyn.fun, '+n+'!');refresh();go('account','overview');return}
- if(m==='login'){var id=g('au-id').toLowerCase();if(!id||!pw)return aerr('Enter your email or username and your password.');
+ if(m==='login'){var id=g('au-id').toLowerCase();if(!id||!pw)return aerr('Enter your email or username and your password.');if(WAPI.ok)return WAPI.login(id,pw);
   var k=Object.keys(o.a).find(function(x){return x===id||o.a[x].n.toLowerCase()===id});
   if(!k||(await pwHash(o.a[k].s,pw))!==o.a[k].h)return aerr('That email, username or password is not right.');
   var sn=o.s[k];if(sn){S.bal=sn.bal;S.inv=sn.inv||[];S.hist=sn.hist||[];S.daily=sn.daily||0;S.stats=sn.stats||S.stats;S.user=sn.user;S.set=Object.assign(S.set,sn.set||{})}else{S.user=Object.assign({},S.user,{name:o.a[k].n,email:k,guest:false})}
   S.user.guest=false;S.acct=k;Snd.on=S.set.sound;Snd.vol=S.set.vol;Snd.ui=S.set.ui!==false;save();Snd.sell();toast('Welcome back, '+S.user.name+'!');refresh();go('account','overview');return}
- if(m==='forgot'){var e2=g('au-e').toLowerCase();if(!o.a[e2])return aerr('We could not find an account with that email.');if(pw.length<8)return aerr('Your new password needs at least 8 characters.');
+ if(m==='forgot'){if(WAPI.ok)return aerr('Password reset by email is not switched on yet. Please contact our team and we will help you.');var e2=g('au-e').toLowerCase();if(!o.a[e2])return aerr('We could not find an account with that email.');if(pw.length<8)return aerr('Your new password needs at least 8 characters.');
   o.a[e2].s=rnd().slice(0,16);o.a[e2].h=await pwHash(o.a[e2].s,pw);accPut(o);S.am='login';S.aerr='';renderAuth();toast('Password updated. You can log in now.')}}
 document.addEventListener('focusout',function(e){var s=e.target;if(s&&(s.id==='au-e')&&S.am==='signup'){s.dataset.t='1';liveHint(s)}});
 document.addEventListener('submit',function(e){if(e.target.id==='af'){e.preventDefault();var b=e.target.querySelector('button[type=submit]'),t=b.textContent;if(b.disabled)return;b.disabled=true;b.textContent=S.am==='signup'?'Creating your account…':S.am==='forgot'?'Saving…':'Logging in…';authSubmit().then(function(){if(document.body.contains(b)){b.disabled=false;b.textContent=t}},function(){b.disabled=false;b.textContent=t})}});
@@ -2414,7 +2433,7 @@ function act(b){var a=b.dataset.act;
  if(a==='unship'){var u=S.inv.find(function(x){return x.id===b.dataset.i});if(u){delete u.sh;toast('Shipment cancelled');refresh()}return}
  if(a==='color'){S.user.color=b.dataset.col;save();renderAcc();renderTop();return}
  if(a==='saveprofile'){var n=$('pn').value.trim();if(!/^[A-Za-z0-9_]{3,20}$/.test(n)){toast('Use 3 to 20 letters, numbers or underscores.');Snd.err();return}S.user.name=n;Snd.sell();toast('Profile saved');refresh();return}
- if(a==='signout'){save();S.acct=null;freshState();save();toast('You are signed out');refresh();go('home');return}
+ if(a==='signout'){save();WAPI.logout();S.acct=null;freshState();save();toast('You are signed out');refresh();go('home');return}
  if(a==='am'){S.am=b.dataset.am;S.aerr='';renderAuth();return}
  if(a==='eye'){var pi=b.parentNode.querySelector('input');var sh=pi.type==='password';pi.type=sh?'text':'password';b.textContent=sh?'Hide':'Show';b.setAttribute('aria-label',sh?'Hide password':'Show password');return}
  if(a==='aav'){S.sa=b.dataset.k;document.querySelectorAll('.avp button').forEach(function(x){x.classList.toggle('on',x===b)});return}
@@ -2515,7 +2534,7 @@ function build(){
  for(i=0;i<14;i++){var tp=TS[i%TS.length],pq=pk(d.pl),tt=NOW-R()*9*DAY;d.tk.push({id:'T-'+(310+i),pid:pq.id,cat:tp[0],sub:tp[1],t:tt,s:i<6?'open':i<9?'pending':'closed',pr:pk(['Normal','Normal','High']),msgs:[{f:'p',t:tt,x:tp[2]}]})}
  d.tk.sort(function(a,b){return b.t-a.t});
  /* real accounts from this browser */
- try{var o=accGet(),em;for(em in o.a){var sn=o.s[em]||{},us=sn.user||{},id='L-'+hue(em)+em.length,pl={id:id,n:o.a[em].n||em.split('@')[0],e:em,c:((us.addr&&us.addr.ci)||'CY'),t:us.since||NOW,st:'active',notes:'',tags:[],adj:[],live:true,seen:NOW,g:{spent:(sn.stats||{}).spent||0,opens:(sn.stats||{}).opens||0,won:(sn.stats||{}).won||0,bal:sn.bal||0}};d.pl.push(pl);d.byP[id]=pl;
+ try{var o=accAll(),em;for(em in o.a){var sn=o.s[em]||{},us=sn.user||{},id='L-'+hue(em)+em.length,pl={id:id,n:o.a[em].n||em.split('@')[0],e:em,c:((us.addr&&us.addr.ci)||'CY'),t:us.since||NOW,st:'active',notes:'',tags:[],adj:[],live:true,seen:NOW,g:{spent:(sn.stats||{}).spent||0,opens:(sn.stats||{}).opens||0,won:(sn.stats||{}).won||0,bal:sn.bal||0}};d.pl.push(pl);d.byP[id]=pl;
    (sn.hist||[]).forEach(function(h,x){var m=/^Deposit \((.+)\)/.exec(h.txt||'');if(m&&h.amt>0)d.dep.push({id:'D-L'+hue(em)+x,pid:id,t:h.t,a:h.amt,m:m[1],s:'completed',tx:'demo',fee:0,live:true})});
    (sn.inv||[]).forEach(function(v){if(v.sh)d.or.push({id:'O-L'+hue(v.id||em)+(v.sh%1000),pid:id,t:v.sh,s:'requested',item:v.n,k:v.k,v:v.v,box:v.b||'',city:'(live)',trk:'',live:true})})}}catch(e){}
  d.dep.sort(function(a,b){return b.t-a.t});d.wd.sort(function(a,b){return b.t-a.t});(function(){var pe=d.wd.filter(function(x){return x.s==='pending'}),i;for(i=1;i<pe.length;i++){if(pe[i].pid!==pe[0].pid){pe[i].dest=pe[0].dest;break}}})();d.or.sort(function(a,b){return b.t-a.t});
@@ -2776,7 +2795,9 @@ f.onsubmit=function(ev){ev.preventDefault();B.disabled=true;E.textContent='';fet
 setTimeout(function(){var u=WLG.querySelector('#wlgU');if(u)u.focus()},30)}
 function wlgHide(){if(WLG)WLG.hidden=true;if(location.hash==='#admin')history.replaceState(null,'',location.pathname+location.search)}
 function wlgOut(){var t=document.querySelector('#adm .ax-sf');if(!t||document.getElementById('wlo'))return;wlgCss();var b=document.createElement('button');b.id='wlo';b.type='button';b.textContent='Log out';b.addEventListener('click',function(){fetch('/api/admin/logout',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}'}).finally(function(){location.href=location.pathname})});t.appendChild(b)}
-function openAdmin(pg){var go=function(){openAdminReal(pg);wlgOut()};fetch('/api/admin/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{ok:false,down:1}}).then(function(j){if(j&&j.ok)go();else wlgShow(go,j&&j.down)}).catch(function(){wlgShow(go,1)})}
+var WPL=[];
+function accAll(){var o=accGet();if(!WPL.length)return o;var a=Object.assign({},o.a),s=Object.assign({},o.s);WPL.forEach(function(p){var em=p.email,st=p.state||{};a[em]={n:p.name,e:em};s[em]=Object.assign({},st,{user:Object.assign({},st.user||{},{since:Math.round(p.created*1000)})})});return{a:a,s:s}}
+function openAdmin(pg){var go=function(){fetch('/api/admin/players',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{}}).then(function(j){WPL=j.players||[]},function(){}).then(function(){openAdminReal(pg);wlgOut()})};fetch('/api/admin/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():{ok:false,down:1}}).then(function(j){if(j&&j.ok)go();else wlgShow(go,j&&j.down)}).catch(function(){wlgShow(go,1)})}
 function openAdminReal(pg){build();if(!ST.sd){ST.sd=1;var t=Date.now();[['Settings saved','Payment methods'],['Box "Raging Bull" updated','Price changed'],['Withdrawal W-9104 approved','$250'],['Player banned','chargeback'],['Promo code created','WELCOME10'],['Order O-2041 shipped','DHL']].forEach(function(x,i){ST.au.push({t:t-(i+1)*3.1*3600e3,a:x[0],x:x[1],w:i%2?'Finance team':'You'})});sv()}
  $a('adm').hidden=false;document.body.classList.add('ax-on');var side=$a('axSide');if(!side.dataset.ok){side.dataset.ok=1}show(pg||AX.page);$a('adm').focus({preventScroll:true})}
 function closeAdmin(){closeDr();$a('adm').hidden=true;$a('adm').classList.remove('menu');document.body.classList.remove('ax-on');publicRefresh();if(location.hash==='#admin')history.replaceState(null,'',location.pathname+location.search)}
