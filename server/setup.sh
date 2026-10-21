@@ -34,8 +34,8 @@ chmod -R a+rX /srv/wynfun
 echo "==> 4/7 Choose a password for the private staging site (staging.$DOMAIN)"
 echo "    You will type it when you open the staging address. Username: staging"
 while :; do
-  read -rsp "    Staging password (min 10 characters): " PW1; echo
-  read -rsp "    Type it again: " PW2; echo
+  read -rsp "    Staging password (min 10 characters): " PW1 </dev/tty; echo
+  read -rsp "    Type it again: " PW2 </dev/tty; echo
   [ "$PW1" = "$PW2" ] && [ "${#PW1}" -ge 10 ] && break
   echo "    They did not match or were too short. Try again."
 done
