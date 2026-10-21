@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs every minute from a timer: publishes staging and live when their branches change.
+/usr/local/bin/wyn-deploy staging || true
+/usr/local/bin/wyn-deploy live || true

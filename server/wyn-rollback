@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# wyn-rollback <live|staging>
+# Points the site back to the previous published version.
+# Automatic publishing pauses until the next new commit arrives on that branch.
+set -euo pipefail
+BASE="${WYN_BASE:-/srv/wynfun}"
+REPO="${WYN_REPO:-/opt/wynfun-repo}"
+ENVN="${1:-}"
+case "$ENVN" in live) BR=main;; staging) BR=staging;; *) echo "usage: wyn-rollback <live|staging>"; exit 2;; esac
+CURDIR="$(readlink -f "$BASE/$ENVN")"
+PREV="$(ls -1d "$BASE/releases/$ENVN"/* | sort | awk -v c="$CURDIR" '$0==c{print p; exit} {p=$0}')"
+[ -n "${PREV:-}" ] || { echo "no older version to go back to"; exit 1; }
+ln -sfn "$PREV" "$BASE/$ENVN.new"
+mv -Tf "$BASE/$ENVN.new" "$BASE/$ENVN"
+( cd "$REPO" && git fetch -q origin "$BR" && git rev-parse "origin/$BR" ) > "$BASE/$ENVN.sha"
+echo "$(date -u +%FT%TZ) $ENVN rolled back to $(basename "$PREV")" >> "$BASE/deploy.log"
+echo "$ENVN is now: $(basename "$PREV")"
