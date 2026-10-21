@@ -1452,6 +1452,63 @@ class Players:
         return {"name": p["name"], "email": p["email"], "created": p["created"],
                 "state": json.loads(p["state"]) if p["state"] else None, "ver": p["ver"]}
 
+    def admin_data(self):
+        """Real players, payments, orders and per-box totals for the main admin dashboard."""
+        db = self.db()
+        try:
+            def one(q, a=()):
+                return db.execute(q, a).fetchone()
+            pl = []
+            for r in db.execute("SELECT id,name,email,created,last_login,banned,real_cents,state FROM players ORDER BY created DESC LIMIT 5000"):
+                try:
+                    st = json.loads(r["state"] or "{}")
+                except Exception:
+                    st = {}
+                u = st.get("user") or {}
+                ad = u.get("addr") or {}
+                pid = r["id"]
+                o = one("SELECT COUNT(*) n, COALESCE(SUM(price_cents),0) w FROM opens WHERE pid=?", (pid,))
+                g = one("SELECT COALESCE(SUM(bet_cents),0) b, COALESCE(SUM(pay_cents),0) p FROM plays WHERE pid=?", (pid,))
+                it = one("SELECT COALESCE(SUM(value_cents),0) v FROM items WHERE pid=? AND bname<>'Upgrade prize'", (pid,))
+                pl.append({"id": pid, "name": r["name"], "email": r["email"], "created": r["created"], "seen": r["last_login"], "banned": bool(r["banned"]),
+                           "bal_cents": r["real_cents"], "opens": o["n"], "spent_cents": o["w"] + g["b"], "won_cents": g["p"] + it["v"],
+                           "country": str(ad.get("ci") or "")[:2].upper()})
+            dep = [dict(r) for r in db.execute("SELECT id,pid,coin,network,claimed_cents,txid,status,credited_cents,created,decided FROM deposits ORDER BY id DESC LIMIT 2000")]
+            wd = [dict(r) for r in db.execute("SELECT id,pid,coin,network,address,cents,status,txid,created,decided FROM withdrawals ORDER BY id DESC LIMIT 2000")]
+            orders = []
+            for r in db.execute("SELECT i.id,i.pid,i.name,i.icon,i.value_cents,i.bname,i.ship,i.status,i.sold,p.state FROM items i JOIN players p ON p.id=i.pid WHERE (i.status='held' AND i.ship IS NOT NULL) OR i.status='shipped' ORDER BY COALESCE(i.ship,i.sold) DESC LIMIT 2000"):
+                try:
+                    ad = ((json.loads(r["state"] or "{}").get("user") or {}).get("addr")) or {}
+                except Exception:
+                    ad = {}
+                orders.append({"id": r["id"], "pid": r["pid"], "name": r["name"], "icon": r["icon"], "value_cents": r["value_cents"], "box": r["bname"],
+                               "requested": r["ship"] or r["sold"], "status": r["status"], "city": str(ad.get("city") or ad.get("ci") or "")[:60]})
+            bs = {}
+            for r in db.execute("SELECT bname, COUNT(*) n, COALESCE(SUM(price_cents),0) w FROM opens GROUP BY bname"):
+                bs[r["bname"]] = {"opens": r["n"], "wager_cents": r["w"], "paid_cents": 0}
+            for r in db.execute("SELECT bname, COALESCE(SUM(value_cents),0) v FROM items WHERE bname<>'Upgrade prize' GROUP BY bname"):
+                if r["bname"] in bs:
+                    bs[r["bname"]]["paid_cents"] = r["v"]
+            aud = [dict(r) for r in db.execute("SELECT ts,who,action,detail FROM audit ORDER BY id DESC LIMIT 300")]
+            return {"players": pl, "deposits": dep, "withdrawals": wd, "orders": orders, "boxes": bs, "audit": aud}
+        finally:
+            db.close()
+
+    def admin_ban(self, email, banned, who):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            p = db.execute("SELECT id FROM players WHERE email=?", (str(email).strip().lower(),)).fetchone()
+            if not p:
+                db.execute("ROLLBACK")
+                return None, "No player with that email."
+            db.execute("UPDATE players SET banned=? WHERE id=?", (1 if banned else 0, p["id"]))
+            self.audit(db, who, "ban" if banned else "unban", {"email": str(email)[:120]})
+            db.execute("COMMIT")
+            return True, None
+        finally:
+            db.close()
+
     def listing(self):
         db = self.db()
         try:
@@ -1654,6 +1711,10 @@ class H(BaseHTTPRequestHandler):
             if not self.admin_ok():
                 return self.send(401, {"error": "sign in"})
             return self.send(200, app.players.admin_wallet())
+        if self.path == "/api/admin/data":
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, app.players.admin_data())
         if self.path == "/api/admin/players":
             if not self.admin_ok():
                 return self.send(401, {"error": "sign in"})
@@ -1854,6 +1915,8 @@ class H(BaseHTTPRequestHandler):
                 r, err = app.players.admin_shipment(int(body.get("id") or 0), body.get("action"), note, who)
             elif act == "adjust":
                 r, err = app.players.admin_adjust(str(body.get("email", "")), body.get("amount"), note, who)
+            elif act == "ban":
+                r, err = app.players.admin_ban(str(body.get("email", "")), bool(body.get("banned")), who)
             elif act == "settings":
                 r, err = app.players.admin_settings(body, who)
             else:
