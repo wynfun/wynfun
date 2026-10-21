@@ -115,6 +115,8 @@ class Players:
         self.login_ip = Limiter(10, 900)
         self.login_id = Limiter(10, 900)
         self.name_lim = Limiter(60, 600)
+        self.chat_lim = Limiter(90, 60)
+        self.chat_msg_lim = Limiter(20, 60)
         db = self.db()
         db.executescript("""
         CREATE TABLE IF NOT EXISTS players(
@@ -123,6 +125,12 @@ class Players:
           last_login REAL, state TEXT, ver INTEGER NOT NULL DEFAULT 0, upd REAL, banned INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS psessions(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, idle REAL NOT NULL, mx REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS ps_pid ON psessions(pid);
+        CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+        INSERT OR IGNORE INTO meta(k,v) VALUES('chatseq',0);
+        CREATE TABLE IF NOT EXISTS chat_threads(pid INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'ai', ru INTEGER NOT NULL DEFAULT 0, ra INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0, upd REAL);
+        CREATE TABLE IF NOT EXISTS chat_msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, f TEXT NOT NULL, t REAL NOT NULL, x TEXT NOT NULL, extra TEXT);
+        CREATE INDEX IF NOT EXISTS cm_pid ON chat_msgs(pid, id);
+        CREATE INDEX IF NOT EXISTS ct_seq ON chat_threads(seq);
         """)
         db.commit()
         db.close()
@@ -239,6 +247,123 @@ class Players:
                 return True, ver + 1, None
             r = db.execute("SELECT state, ver FROM players WHERE id=?", (pid,)).fetchone()
             return False, r["ver"], (json.loads(r["state"]) if r["state"] else None)
+        finally:
+            db.close()
+
+    # ----- support chat (player <-> team), same on every device -----
+    CHAT_MODES = ("ai", "wait", "human", "closed")
+
+    def _bump(self, db, pid):
+        db.execute("UPDATE meta SET v=v+1 WHERE k='chatseq'")
+        seq = db.execute("SELECT v FROM meta WHERE k='chatseq'").fetchone()[0]
+        db.execute("INSERT OR IGNORE INTO chat_threads(pid) VALUES(?)", (pid,))
+        db.execute("UPDATE chat_threads SET seq=?, upd=? WHERE pid=?", (seq, time.time(), pid))
+        return seq
+
+    def _clean_msg(self, m, allowed):
+        if not isinstance(m, dict) or m.get("f") not in allowed:
+            return None
+        x = str(m.get("x", ""))[: (500 if m.get("f") == "u" else 1500)]
+        if not x.strip():
+            return None
+        ex = m.get("extra")
+        if isinstance(ex, dict):
+            ex = {k: ex[k] for k in ("links", "offer") if k in ex}
+            ex = json.dumps(ex) if ex and len(json.dumps(ex)) <= 1500 else None
+        else:
+            ex = None
+        try:
+            t = float(m.get("t"))
+        except Exception:
+            t = time.time() * 1000
+        t = min(max(t, 0), time.time() * 1000 + 60000)
+        return (m["f"], t, x, ex)
+
+    def _thread_out(self, db, pid, full=True):
+        th = db.execute("SELECT * FROM chat_threads WHERE pid=?", (pid,)).fetchone()
+        if not th:
+            return {"mode": "ai", "ru": 0, "ra": 0, "seq": 0, "msgs": []}
+        rows = db.execute("SELECT id,f,t,x,extra FROM chat_msgs WHERE pid=? ORDER BY id DESC LIMIT 200", (pid,)).fetchall()[::-1]
+        msgs = []
+        for r in rows:
+            m = {"sid": r["id"], "f": r["f"], "t": r["t"], "x": r["x"]}
+            if r["extra"]:
+                m.update(json.loads(r["extra"]))
+            msgs.append(m)
+        return {"mode": th["mode"], "ru": th["ru"], "ra": th["ra"], "seq": th["seq"], "msgs": msgs}
+
+    def chat_player_sync(self, pid, seq, add, mode, read):
+        db = self.db()
+        try:
+            th = db.execute("SELECT * FROM chat_threads WHERE pid=?", (pid,)).fetchone()
+            changed = False
+            cur = th["mode"] if th else "ai"
+            ra, ru = (th["ra"], th["ru"]) if th else (0, 0)
+            rows = []
+            for m in (add if isinstance(add, list) else [])[:30]:
+                c = self._clean_msg(m, ("u", "b", "s"))
+                if c:
+                    rows.append(c)
+            if rows or (mode in ("ai", "wait", "human") and mode != cur) or (read and ru):
+                if rows and not self.chat_msg_lim.hit(pid):
+                    return {"error": "slow"}
+                new_mode = mode if mode in ("ai", "wait", "human") else cur
+                if new_mode == "wait" and cur not in ("wait", "human"):
+                    ra += 1
+                if cur in ("wait", "human"):
+                    ra += sum(1 for r in rows if r[0] == "u")
+                if cur == "closed" and any(r[0] == "u" for r in rows) and new_mode == "closed":
+                    new_mode = "ai"
+                if read:
+                    ru = 0
+                db.execute("INSERT OR IGNORE INTO chat_threads(pid) VALUES(?)", (pid,))
+                db.execute("UPDATE chat_threads SET mode=?, ru=?, ra=? WHERE pid=?", (new_mode, ru, ra, pid))
+                for r in rows:
+                    db.execute("INSERT INTO chat_msgs(pid,f,t,x,extra) VALUES(?,?,?,?,?)", (pid, r[0], r[1], r[2], r[3]))
+                self._bump(db, pid)
+                db.commit()
+                changed = True
+            th2 = db.execute("SELECT seq FROM chat_threads WHERE pid=?", (pid,)).fetchone()
+            cur_seq = th2["seq"] if th2 else 0
+            if not changed and seq == cur_seq:
+                return {"unchanged": True, "seq": cur_seq}
+            return self._thread_out(db, pid)
+        finally:
+            db.close()
+
+    def chat_admin_sync(self, since, add, modes):
+        db = self.db()
+        try:
+            def pid_of(em):
+                r = db.execute("SELECT id FROM players WHERE email=?", (str(em).strip().lower(),)).fetchone()
+                return r["id"] if r else None
+            touched = set()
+            for m in (add if isinstance(add, list) else [])[:50]:
+                pid = pid_of(m.get("em", "")) if isinstance(m, dict) else None
+                c = self._clean_msg(m, ("a", "s")) if pid else None
+                if not c:
+                    continue
+                db.execute("INSERT OR IGNORE INTO chat_threads(pid) VALUES(?)", (pid,))
+                db.execute("INSERT INTO chat_msgs(pid,f,t,x,extra) VALUES(?,?,?,?,?)", (pid, c[0], c[1], c[2], c[3]))
+                if c[0] == "a":
+                    db.execute("UPDATE chat_threads SET ru=ru+1, ra=0, mode=CASE WHEN mode='closed' THEN 'closed' ELSE 'human' END WHERE pid=?", (pid,))
+                touched.add(pid)
+            for em, md in (modes.items() if isinstance(modes, dict) else []):
+                pid = pid_of(em)
+                if pid and md in self.CHAT_MODES:
+                    db.execute("INSERT OR IGNORE INTO chat_threads(pid) VALUES(?)", (pid,))
+                    db.execute("UPDATE chat_threads SET mode=?, ru=ru+? WHERE pid=?", (md, 0 if md == "closed" else 1, pid))
+                    touched.add(pid)
+            for pid in touched:
+                self._bump(db, pid)
+            db.commit()
+            out = []
+            top = db.execute("SELECT v FROM meta WHERE k='chatseq'").fetchone()[0]
+            for r in db.execute("SELECT t.pid, t.seq, p.email, p.name FROM chat_threads t JOIN players p ON p.id=t.pid WHERE t.seq>? ORDER BY t.seq LIMIT 300", (since,)).fetchall():
+                d = self._thread_out(db, r["pid"])
+                d["em"], d["n"] = r["email"], r["name"]
+                out.append(d)
+            return {"threads": out, "seq": top}
         finally:
             db.close()
 
@@ -486,6 +611,26 @@ class H(BaseHTTPRequestHandler):
             if nver is None:
                 return self.send(400, {"error": "bad state"})
             return self.send(409, {"error": "newer", "ver": nver, "state": other})
+        if self.path == "/api/chat/sync":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            if not app.players.chat_lim.hit(p["id"]):
+                return self.send(429, {"error": "slow down"})
+            try:
+                seq = int(body.get("seq") or 0)
+            except Exception:
+                seq = 0
+            out = app.players.chat_player_sync(p["id"], seq, body.get("add"), body.get("mode"), bool(body.get("read")))
+            return self.send(429 if out.get("error") else 200, out)
+        if self.path == "/api/admin/chat/sync":
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            try:
+                since = int(body.get("since") or 0)
+            except Exception:
+                since = 0
+            return self.send(200, app.players.chat_admin_sync(since, body.get("add"), body.get("modes")))
         if self.path == "/api/admin/logout":
             app.end_session(self.cookie_val())
             return self.send(200, {"ok": True}, self.set_cookie("", 0))
