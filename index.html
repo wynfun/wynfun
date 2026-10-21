@@ -1989,6 +1989,7 @@ function fmt(n){n=Number(n);return n.toLocaleString(undefined,n%1?{minimumFracti
 var tt;function toast(m){var t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(tt);tt=setTimeout(function(){t.classList.remove('on')},2600)}
 function log(type,txt,amt){S.hist.unshift({t:Date.now(),type:type,txt:txt,amt:amt||0});if(S.hist.length>80)S.hist.pop()}
 function addBal(n){S.bal=Math.round((S.bal+n)*100)/100}
+function realGate(){if(!(WAPI.ok&&WAPI.me))return false;toast('Playing with your wallet balance opens very soon. Free demo spins work now.');Snd.err();return true}
 function invValue(){return S.inv.reduce(function(a,x){return a+x.v},0)}
 function giveItem(it,box){var o={id:'i'+Date.now()+Math.random().toString(36).slice(2,6),n:it.n,k:it.k,v:it.v,r:it.r,b:box,t:Date.now()};S.inv.unshift(o);if(!S.stats.best||o.v>S.stats.best.v)S.stats.best={n:o.n,k:o.k,v:o.v,r:o.r,b:box};S.stats.won+=o.v;return o.id}
 function sellItem(id,quiet){var k=S.inv.findIndex(function(x){return x.id===id});if(k<0)return 0;if(S.inv[k].sh){toast('Cancel the shipment first to sell this item.');return 0}var x=S.inv.splice(k,1)[0];addBal(x.v);S.stats.sold+=x.v;log('sell','Sold '+x.n,x.v);if(!quiet){Snd.sell();toast('Sold '+x.n+' for $'+fmt(x.v))}return x.v}
@@ -2131,6 +2132,7 @@ document.addEventListener('keydown',function(e){var o=$('wzdt');if(o&&!o.hidden)
 async function spin(free){
  var p=P[S.cur];if(S.busy)return;Snd.init();
  if(!free&&S.bal<p.p){$('mc').classList.remove('won');$('res').innerHTML='<b>Not enough funds.</b> <button class="btn g" data-act="gofunds">Add funds</button>';Snd.err();return}
+ if(!free&&realGate())return;
  S.busy=true;setBtns(true);
  if(!free){addBal(-p.p);S.stats.spent+=p.p;S.stats.opens++;renderTop()}
  var rr=Math.random();if(!free){var hh=await sha(FAIR.seed+':'+FAIR.cs+':'+FAIR.nonce);rr=parseInt(hh.slice(0,8),16)/4294967296}
@@ -2156,6 +2158,7 @@ function resetBattle(){$('b1').className='side';$('b2').className='side';$('b1')
 $('bsel').innerHTML=P.map(function(p,k){return '<option value="'+k+'">'+p.n+' · $'+fmt(p.p)+'</option>'}).join('');
 $('bgo').onclick=function(){var p=P[+$('bsel').value];if(S.busy)return;Snd.init();
  if(S.bal<p.p){toast('Not enough funds yet. Add funds and try again.');Snd.err();return}
+ if(realGate())return;
  S.busy=true;$('bgo').disabled=true;addBal(-p.p);S.stats.spent+=p.p;S.stats.opens++;renderTop();$('bres').textContent='Opening…';
  $('b1').innerHTML='<div class="e">'+ic('box')+'</div>';$('b2').innerHTML='<div class="e">'+ic('box')+'</div>';
  var n=0,iv=setInterval(function(){Snd.tick();if(++n>12)clearInterval(iv)},100);Snd.whoosh();
@@ -2454,8 +2457,10 @@ function wdHTML(w){var cf=w.config,cs=coins(w);
  var sel=cs.filter(function(c){return c.id===F.wcoin})[0]||cs[0];F.wcoin=sel.id;
  return '<div class="panel" style="margin-bottom:14px"><h3>Withdraw</h3>'+head(w)+'<label class="lb">Coin</label>'+tiles(cs,sel.id,'wcoin',1)+netRow(cs,sel.id,'wcoin')+'<label class="lb" for="wl-addr">Your '+esc(sel.label)+(sel.network?' ('+esc(sel.network)+')':'')+' address</label><input class="fi" id="wl-addr" maxlength="120" autocomplete="off" spellcheck="false" value="'+esc(F.addr)+'" data-wl-in="addr"><label class="lb" for="wl-wamt">Amount (USD)</label><input class="fi" id="wl-wamt" type="number" min="1" step="0.01" inputmode="decimal" value="'+esc(F.wamt)+'" data-wl-in="wamt"><p class="mut" style="margin:6px 0 0;font-size:.85rem">Smallest withdrawal: $'+fmt(cf.min_withdraw)+'. Check the address carefully, payments cannot be undone. We send it by hand after a safety check.</p><button class="btn g" style="width:100%;margin-top:14px" data-wl="wd"'+(busy?' disabled':'')+'>Request withdrawal</button><h3 style="margin-top:18px">Your withdrawals</h3>'+wList(w)+'</div>'}
 window.walletHTML=function(mode){if(!on())return '';var w=WAPI.wallet;if(!w)return '<div class="panel" style="margin-bottom:14px"><h3>Wallet</h3><p class="mut" style="margin:0">Loading&hellip;</p></div>';return mode==='dep'?depHTML(w):wdHTML(w)};
-window.walletLoad=function(){if(!on()||WAPI.wallet||WAPI.wl)return;WAPI.wl=1;fetch('/api/wallet',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(j){WAPI.wl=0;if(j&&j.config){WAPI.wallet=j;if(S.view==='account'&&(S.tab==='funds'||S.tab==='withdraw'))renderAcc()}},function(){WAPI.wl=0})};
-function post(u,b,done){busy=1;renderAcc();fetch(u,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{s:r.status,j:j}})}).then(function(x){busy=0;if(x.s===200&&x.j.ok){WAPI.wallet=x.j.wallet;done();renderAcc()}else{toast(x.j.error||'Something went wrong. Please try again.');Snd.err();renderAcc()}},function(){busy=0;toast('Cannot reach the server right now.');renderAcc()})}
+window.walletLoad=function(){if(!on()||WAPI.wallet||WAPI.wl)return;WAPI.wl=1;fetch('/api/wallet',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(j){WAPI.wl=0;if(j&&j.config){WAPI.wallet=j;mirror();if(S.view==='account'&&(S.tab==='funds'||S.tab==='withdraw'))renderAcc()}},function(){WAPI.wl=0})};
+function mirror(){if(on()&&WAPI.wallet){var v=Math.round(WAPI.wallet.real_cents)/100;if(S.bal!==v){S.bal=v;try{renderTop();if(S.view==='account'){var ae=document.activeElement;if(!(ae&&/INPUT|TEXTAREA|SELECT/.test(ae.tagName)))renderAcc()}}catch(e){}}}}
+var wlT=0;setInterval(function(){if(!on()||document.hidden||WAPI.wl||busy)return;var n=Date.now();if(WAPI.wallet&&n-wlT<15000)return;wlT=n;WAPI.wl=1;fetch('/api/wallet',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(j){WAPI.wl=0;if(j&&j.config){var ch=!WAPI.wallet||JSON.stringify(j.deposits)!==JSON.stringify(WAPI.wallet.deposits)||JSON.stringify(j.withdrawals)!==JSON.stringify(WAPI.wallet.withdrawals);WAPI.wallet=j;mirror();if(ch&&S.view==='account'&&(S.tab==='funds'||S.tab==='withdraw')){var ae=document.activeElement;if(!(ae&&/INPUT|TEXTAREA|SELECT/.test(ae.tagName)))renderAcc()}}},function(){WAPI.wl=0})},3000);
+function post(u,b,done){busy=1;renderAcc();fetch(u,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){return{s:r.status,j:j}})}).then(function(x){busy=0;if(x.s===200&&x.j.ok){WAPI.wallet=x.j.wallet;mirror();done();renderAcc()}else{toast(x.j.error||'Something went wrong. Please try again.');Snd.err();renderAcc()}},function(){busy=0;toast('Cannot reach the server right now.');renderAcc()})}
 document.addEventListener('input',function(e){var k=e.target&&e.target.getAttribute&&e.target.getAttribute('data-wl-in');if(k)F[k]=e.target.value});
 document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-wl]');if(!b||busy)return;var a=b.getAttribute('data-wl');
  if(a==='coin'){F.coin=b.getAttribute('data-id');renderAcc();return}
@@ -2487,7 +2492,7 @@ function liveHint(el){var id=el.id,h=$(id+'-h'),v=el.value.trim(),w=$(id+'-w');i
 var WAPI=(function(){
  var W={ok:false,me:null,ver:0,mute:0},tm=0,busy=0,dirty=0,nt=0;
  function J(m,u,b){return fetch(u,{method:m,credentials:'same-origin',cache:'no-store',keepalive:!!b&&m==='POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json().catch(function(){return{}}).then(function(j){j.status=r.status;return j})})}
- function adopt(u){W.wallet=null;W.mute=1;try{var st=u.state;if(st){if(typeof st.bal==='number')S.bal=st.bal;S.inv=st.inv||[];S.hist=st.hist||[];S.daily=st.daily||0;S.stats=st.stats||S.stats;S.set=Object.assign(S.set,st.set||{});S.user=Object.assign({},S.user,st.user||{})}
+ function adopt(u){W.wallet=null;W.mute=1;try{var st=u.state;if(st){if(typeof st.bal==='number')S.bal=WAPI.ok?0:st.bal;S.inv=st.inv||[];S.hist=st.hist||[];S.daily=st.daily||0;S.stats=st.stats||S.stats;S.set=Object.assign(S.set,st.set||{});S.user=Object.assign({},S.user,st.user||{})}
   S.acct=u.email;S.user.name=u.name;S.user.email=u.email;S.user.guest=false;if(!S.user.since)S.user.since=(u.created||0)*1000||Date.now();W.me=u;W.ver=u.ver||0;Snd.on=S.set.sound;Snd.vol=S.set.vol;Snd.ui=S.set.ui!==false;save()}finally{W.mute=0}}
  W.ready=J('GET','/api/me').then(function(j){if(!j.api)return;W.ok=true;W.mail=!!j.mail;var rm=/[?&]reset=([\w-]+)/.exec(location.search);if(rm){W.rt=rm[1];try{history.replaceState(null,'',location.pathname+location.hash)}catch(e){}go('auth','reset')}if(j.user){adopt(j.user);try{refresh()}catch(e){}}else if(S.acct){S.acct=null;freshState();save();try{refresh()}catch(e){}}},function(){});
  W.push=function(){if(W.mute||!W.ok||!W.me||!S.acct)return;clearTimeout(tm);tm=setTimeout(W.pushNow,1500)};
@@ -3735,6 +3740,7 @@ async function crStart(){if(CR.st==='fly'||CR.st==='start')return;var bet=Math.r
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return}
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return}
  if(au&&au<1.01){toast('Auto eject needs to be 1.01x or more.');Snd.err();return}
+ if(realGate())return;
  CR.st='start';CR.b=bet;CR.cd=3;crUi();
  var hx=await sha(CR.seed+':'+CR.cs+':'+CR.nonce);CR.cp=crPoint(hx);CR.pend={seed:CR.seed,cs:CR.cs,nonce:CR.nonce,commit:CR.commit};
  addBal(-bet);log('bet','Flying Roadster bet',-bet);renderTop();save();
@@ -3841,6 +3847,7 @@ async function plDrop(){var bet=Math.round((+$('plb').value||0)*100)/100;
  if(PL.air>=12)return false;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return false}
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return false}
+ if(realGate())return false;
  PL.bet=bet;addBal(-bet);log('bet','Wyn Drop bet',-bet);renderTop();save();PL.air++;
  var pend={seed:PL.seed,cs:PL.cs,nonce:PL.nonce,cp:PL.cp,rows:PL.rows,risk:PL.risk};PL.seed=rnd();PL.nonce++;plCommit();plUi();
  var hx=await sha(pend.seed+':'+pend.cs+':'+pend.nonce),path=plPath(hx,pend.rows),k=0;path.forEach(function(x){k+=x});
@@ -4062,6 +4069,7 @@ function ghResetBoard(){document.querySelectorAll('#ghbd .ght').forEach(function
 async function ghStart(){if(GH.st==='play'||GH.busy)return;var bet=Math.round((+$('ghb').value||0)*100)/100;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return}
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return}
+ if(realGate())return;
  GH.busy=1;GH.bet=bet;addBal(-bet);log('bet','Gem Hunt bet',-bet);renderTop();save();
  var pend={seed:GH.seed,cs:GH.cs,nonce:GH.nonce,cp:GH.cp,mines:GH.mines};GH.seed=rnd();GH.nonce++;ghCommit();
  ghResetBoard();ghUi();
@@ -4183,6 +4191,7 @@ function wwMsg(t,c){var m=$('wwmsg');if(m){m.textContent=t;m.className='crmsg'+(
 async function wwSpin(){if(WW.st==='spin'||WW.busy)return;var bet=Math.round((+$('wwb').value||0)*100)/100;
  if(!(bet>=1&&bet<=5000)){toast('Please enter a bet from $1 to $5,000.');Snd.err();return}
  if(bet>S.bal){toast('Not enough funds for that bet. Add funds or lower it.');Snd.err();return}
+ if(realGate())return;
  WW.busy=1;WW.bet=bet;addBal(-bet);log('bet','Wyn Wheel bet',-bet);renderTop();save();
  var pend={seed:WW.seed,cs:WW.cs,nonce:WW.nonce,cp:WW.cp,n:WW.n,risk:WW.risk};WW.seed=rnd();WW.nonce++;wwCommit();wwUi();
  var hx=await sha(pend.seed+':'+pend.cs+':'+pend.nonce),idx=parseInt(hx.slice(0,8),16)%pend.n,vals=wwTbl(pend.n,pend.risk).vals,mult=vals[idx];
