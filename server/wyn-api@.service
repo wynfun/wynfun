@@ -1,0 +1,21 @@
+[Unit]
+Description=wyn.fun API (%i)
+After=network.target
+
+[Service]
+User=wynapi
+Group=wynapi
+ExecStart=/usr/local/bin/wyn-api serve %i
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/wyn
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

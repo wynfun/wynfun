@@ -4,9 +4,7 @@ www.__DOMAIN__ {
 }
 
 __DOMAIN__ {
-	root * /srv/wynfun/live
 	encode zstd gzip
-	file_server
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
@@ -14,27 +12,42 @@ __DOMAIN__ {
 		Strict-Transport-Security "max-age=31536000"
 		-Server
 	}
-	header Cache-Control "no-cache"
-	@static path /img/* /data/*
-	header @static Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
 	log {
 		output file /var/log/caddy/live.log {
 			roll_size 20MiB
 			roll_keep 5
 		}
 	}
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle {
+		root * /srv/wynfun/live
+		file_server
+		header Cache-Control "no-cache"
+		@static path /img/* /data/*
+		header @static Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
+	}
 }
 
 staging.__DOMAIN__ {
-	root * /srv/wynfun/staging
 	encode zstd gzip
-	basic_auth {
-		staging __HASH__
-	}
-	file_server
 	header {
 		X-Robots-Tag "noindex, nofollow"
 		Cache-Control "no-store"
 		-Server
+	}
+	handle /api/* {
+		basic_auth {
+			staging __HASH__
+		}
+		reverse_proxy 127.0.0.1:8082
+	}
+	handle {
+		basic_auth {
+			staging __HASH__
+		}
+		root * /srv/wynfun/staging
+		file_server
 	}
 }
