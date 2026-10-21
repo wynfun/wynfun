@@ -1660,7 +1660,7 @@ button,a,select,summary,[role=button]{touch-action:manipulation}
   <div class="hd"><h2>Big wins</h2><span class="mut" style="font-size:.85rem">Real players</span></div>
   <div class="bws" id="big"></div>
   <section class="feed" id="feed"><div class="hd"><h2><i class="lvd" aria-hidden="true"></i>Live feed</h2><div class="chips" id="btabs"><button class="chip" data-b="all" aria-pressed="true">Everyone</button><button class="chip" data-b="high" aria-pressed="false">Big boxes</button><button class="chip" data-b="lucky" aria-pressed="false">Lucky wins</button></div></div>
-  <p class="hdn">See what other players just opened. These are real openings, with player names partly hidden.</p>
+  <p class="hdn">See what other players just opened. These are real openings by real players.</p>
   <div class="lo" id="bt"></div></section>
   <section class="hw" id="how"><div class="hd"><h2>How it works</h2></div>
    <div class="steps"><div class="st"><div class="sti" id="hi0"></div><b>Pick a box</b><span class="t">Browse by theme and price. Every item and its odds are shown before you spend anything.</span></div><div class="st"><div class="sti" id="hi1"></div><b>Open it</b><span class="t">Watch the reel land on a result that was already fixed before you pressed open.</span></div><div class="st"><div class="sti" id="hi2"></div><b>Sell or ship it</b><span class="t">Cash out instantly, or keep the item and have it shipped to you.</span></div></div></section>
@@ -2078,14 +2078,14 @@ function setMood(m){clearTimeout(MT);document.querySelectorAll('.wyn').forEach(f
 function addDrop(it,r){var d=document.createElement('div');d.className='d';d.style.setProperty('--c',RC[r]);d.innerHTML='<b>'+ic(it[1])+'</b><span class="dv">$'+fmt(it[2])+'</span><em class="dnm"></em><i class="drr">'+RN[r]+'</i>';d.querySelector('.dnm').textContent=it[0];var c=$('dr');c.prepend(d);while(c.children.length>10)c.lastChild.remove()}
 function logBet(){}
 function fake(){}
-var FSEEN={},FFIRST=1;
+var FSEEN={},FFIRST=1,FFIRST0=1;
 function feedLoad(){fetch('/api/recent',{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(j){if(!j)return;
  var bi=function(n){var p=P.find(function(x){return x.n===n||x.on===n});return p},ic0=function(n){var p=bi(n);return p?p.i[p.i.length-1][1]:'box'};
  var L=j.last||[];BETS=L.map(function(r){return{k:ic0(r.box),b:r.box,w:r.w,c:r.price,v:r.v,t:r.t}});
  BIG=(j.big||[]).map(function(r){return{k:r.k,n:r.name,v:r.v,w:r.w,b:r.box,t:r.t}});
  var nw=L.filter(function(r){return !FSEEN[r.id]}).reverse();nw.forEach(function(r){FSEEN[r.id]=1});
  if(FFIRST){nw=nw.slice(-10);FFIRST=0}else nw=nw.slice(-3);
- nw.forEach(function(r){addDrop([r.name,r.k,r.v],Math.max(0,Math.min(4,r.r|0)))});
+ nw.forEach(function(r,i){setTimeout(function(){addDrop([r.name,r.k,r.v],Math.max(0,Math.min(4,r.r|0)))},FFIRST0?0:i*450)});FFIRST0=0;
  var d=$('dr');if(d){d.hidden=!d.children.length;d.removeAttribute('aria-hidden')}
  renderBets();renderBig()},function(){})}
 var LBT=0;
@@ -4283,7 +4283,7 @@ function wwConf(n,big){var st=document.querySelector('.wwstage');if(!st||(window
 /* ---------- init ---------- */
 var hi=['box','gem','wallet'];hi.forEach(function(k,j){$('hi'+j).innerHTML=ic(k)});
 resetBattle();
-feedLoad();setInterval(feedLoad,6000);
+feedLoad();setInterval(feedLoad,4500);
 
 
 $('hot').addEventListener('pointermove',function(e){var b=e.target.closest('.box');if(!b)return;var r=b.getBoundingClientRect(),x=(e.clientX-r.left)/r.width-.5,y=(e.clientY-r.top)/r.height-.5;b.style.transform='perspective(700px) rotateX('+(-y*14)+'deg) rotateY('+(x*14)+'deg) translateY(-6px)'});
