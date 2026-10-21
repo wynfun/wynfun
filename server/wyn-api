@@ -225,7 +225,11 @@ class Limiter:
 
 
 class Players:
-    def __init__(self, folder):
+    def __init__(self, folder, env="live"):
+        self.env = env
+        self.box_file = os.environ.get("WYN_BOXES") or os.path.join(os.environ.get("WYN_SITE_BASE", "/srv/wynfun"), env, "data", "boxes.json")
+        self._boxes = {"mt": None, "d": {}}
+        self.open_lim = Limiter(60, 60)
         self.path = os.path.join(folder, "players.sqlite")
         self.signup_lim = Limiter(5, 3600)
         self.login_ip = Limiter(10, 900)
@@ -257,6 +261,11 @@ class Players:
         CREATE INDEX IF NOT EXISTS wd_pid ON withdrawals(pid, id);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, who TEXT NOT NULL, action TEXT NOT NULL, detail TEXT);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS fair(pid INTEGER PRIMARY KEY, seed TEXT NOT NULL, cs TEXT NOT NULL, nonce INTEGER NOT NULL DEFAULT 0, last TEXT);
+        CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, bname TEXT NOT NULL, name TEXT NOT NULL, icon TEXT NOT NULL, value_cents INTEGER NOT NULL, rar INTEGER NOT NULL, created REAL NOT NULL, status TEXT NOT NULL DEFAULT 'held', ship REAL, sold REAL);
+        CREATE INDEX IF NOT EXISTS it_pid ON items(pid, status, id);
+        CREATE TABLE IF NOT EXISTS opens(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, bname TEXT NOT NULL, price_cents INTEGER NOT NULL, item_idx INTEGER NOT NULL, item_id INTEGER NOT NULL, roll REAL NOT NULL, nonce INTEGER NOT NULL, ts REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS op_pid ON opens(pid, id);
         INSERT OR IGNORE INTO meta(k,v) VALUES('chatseq',0);
         CREATE TABLE IF NOT EXISTS chat_threads(pid INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'ai', ru INTEGER NOT NULL DEFAULT 0, ra INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0, upd REAL);
         CREATE TABLE IF NOT EXISTS chat_msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, f TEXT NOT NULL, t REAL NOT NULL, x TEXT NOT NULL, extra TEXT);
@@ -601,6 +610,174 @@ class Players:
         finally:
             db.close()
 
+    # ---------- boxes: the server decides every result ----------
+    def boxes(self):
+        """Box list shipped with the site (data/boxes.json). Reloads itself when the file changes."""
+        try:
+            mt = os.path.getmtime(self.box_file)
+        except OSError:
+            return self._boxes["d"]
+        if mt != self._boxes["mt"]:
+            raw = json.load(open(self.box_file))
+            d = {}
+            for b in raw:
+                its = [(str(x[0])[:120], str(x[1])[:60], int(round(float(x[2]) * 100)), float(x[3])) for x in b["i"]]
+                if its and all(i[3] > 0 and i[2] >= 0 for i in its):
+                    d[str(b["n"])] = {"p": int(round(float(b["p"]) * 100)), "i": its}
+            self._boxes = {"mt": mt, "d": d}
+        return self._boxes["d"]
+
+    @staticmethod
+    def _pick(items, r):
+        t = sum(i[3] for i in items)
+        v = r * t
+        for k, it in enumerate(items):
+            v -= it[3]
+            if v < 0:
+                return k
+        return len(items) - 1
+
+    @staticmethod
+    def _tier(idx, n):
+        return min(4, (idx * 5) // n)
+
+    def _fair(self, db, pid):
+        r = db.execute("SELECT * FROM fair WHERE pid=?", (pid,)).fetchone()
+        if not r:
+            db.execute("INSERT INTO fair(pid,seed,cs,nonce) VALUES(?,?,?,0)", (pid, secrets.token_hex(16), "wyn-" + secrets.token_hex(4)))
+            r = db.execute("SELECT * FROM fair WHERE pid=?", (pid,)).fetchone()
+        return r
+
+    @staticmethod
+    def _fair_out(r):
+        return {"commit": hashlib.sha256(r["seed"].encode()).hexdigest(), "cs": r["cs"], "nonce": r["nonce"], "last": json.loads(r["last"]) if r["last"] else None}
+
+    def fair_view(self, pid):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            r = self._fair(db, pid)
+            db.execute("COMMIT")
+            return self._fair_out(r)
+        finally:
+            db.close()
+
+    def fair_set_cs(self, pid, cs):
+        cs = str(cs or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", cs):
+            return None, "Use 1 to 32 letters, numbers, - or _."
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            self._fair(db, pid)
+            db.execute("UPDATE fair SET cs=? WHERE pid=?", (cs, pid))
+            r = self._fair(db, pid)
+            db.execute("COMMIT")
+            return self._fair_out(r), None
+        finally:
+            db.close()
+
+    @staticmethod
+    def _item_out(r):
+        return {"id": "s%d" % r["id"], "n": r["name"], "k": r["icon"], "v": r["value_cents"] / 100.0, "r": r["rar"], "b": r["bname"], "t": int(r["created"] * 1000), "sh": int(r["ship"] * 1000) if r["ship"] else 0}
+
+    def open_box(self, pid, bname):
+        b = self.boxes().get(str(bname))
+        if not b:
+            return None, "That box is not available right now. Please refresh the page."
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            f = self._fair(db, pid)
+            h = hashlib.sha256(("%s:%s:%d" % (f["seed"], f["cs"], f["nonce"])).encode()).hexdigest()
+            roll = int(h[:8], 16) / 4294967296
+            idx = self._pick(b["i"], roll)
+            it = b["i"][idx]
+            try:
+                self._post(db, pid, "box", -b["p"], "B:" + str(bname)[:60], "Opened " + str(bname))
+            except ValueError:
+                db.execute("ROLLBACK")
+                return None, "Not enough funds. Add funds and try again."
+            now = time.time()
+            rar = self._tier(idx, len(b["i"]))
+            cur = db.execute("INSERT INTO items(pid,bname,name,icon,value_cents,rar,created) VALUES(?,?,?,?,?,?,?)", (pid, str(bname), it[0], it[1], it[2], rar, now))
+            iid = cur.lastrowid
+            db.execute("INSERT INTO opens(pid,bname,price_cents,item_idx,item_id,roll,nonce,ts) VALUES(?,?,?,?,?,?,?,?)", (pid, str(bname), b["p"], idx, iid, roll, f["nonce"], now))
+            last = {"seed": f["seed"], "cs": f["cs"], "nonce": f["nonce"], "roll": roll, "commit": hashlib.sha256(f["seed"].encode()).hexdigest()}
+            db.execute("UPDATE fair SET seed=?, nonce=nonce+1, last=? WHERE pid=?", (secrets.token_hex(16), json.dumps(last), pid))
+            f2 = self._fair(db, pid)
+            row = db.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+            db.execute("COMMIT")
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+        return {"ok": True, "idx": idx, "item": self._item_out(row), "roll": roll, "fair": self._fair_out(f2), "wallet": self.wallet_view(pid)}, None
+
+    def sell_item(self, pid, sid):
+        m = re.fullmatch(r"s(\d{1,12})", str(sid))
+        if not m:
+            return None, "That item was not found."
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            r = db.execute("SELECT * FROM items WHERE id=? AND pid=?", (int(m.group(1)), pid)).fetchone()
+            if not r or r["status"] != "held":
+                db.execute("ROLLBACK")
+                return None, "That item was already sold."
+            if r["ship"]:
+                db.execute("ROLLBACK")
+                return None, "Cancel the shipment first to sell this item."
+            db.execute("UPDATE items SET status='sold', sold=? WHERE id=?", (time.time(), r["id"]))
+            self._post(db, pid, "sell", r["value_cents"], "I%d" % r["id"], "Sold " + r["name"])
+            db.execute("COMMIT")
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+        return {"ok": True, "sold": r["value_cents"] / 100.0, "name": r["name"], "wallet": self.wallet_view(pid)}, None
+
+    def ship_item(self, pid, sid, on):
+        m = re.fullmatch(r"s(\d{1,12})", str(sid))
+        if not m:
+            return None, "That item was not found."
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            r = db.execute("SELECT * FROM items WHERE id=? AND pid=?", (int(m.group(1)), pid)).fetchone()
+            if not r or r["status"] != "held":
+                db.execute("ROLLBACK")
+                return None, "That item was not found."
+            db.execute("UPDATE items SET ship=? WHERE id=?", (time.time() if on else None, r["id"]))
+            db.execute("COMMIT")
+        finally:
+            db.close()
+        return {"ok": True}, None
+
+    def items_view(self, pid):
+        db = self.db()
+        try:
+            rows = db.execute("SELECT * FROM items WHERE pid=? AND status='held' ORDER BY id DESC LIMIT 500", (pid,)).fetchall()
+            a = db.execute("SELECT COUNT(*) n, COALESCE(SUM(price_cents),0) sp FROM opens WHERE pid=?", (pid,)).fetchone()
+            w = db.execute("SELECT COALESCE(SUM(value_cents),0) won FROM items WHERE pid=?", (pid,)).fetchone()
+            sd = db.execute("SELECT COALESCE(SUM(value_cents),0) sold FROM items WHERE pid=? AND status='sold'", (pid,)).fetchone()
+            best = db.execute("SELECT * FROM items WHERE pid=? ORDER BY value_cents DESC, id ASC LIMIT 1", (pid,)).fetchone()
+            hist = [dict(r) for r in db.execute("SELECT kind,cents,note,created FROM wallet_ledger WHERE pid=? ORDER BY id DESC LIMIT 60", (pid,))]
+            return {"items": [self._item_out(r) for r in rows],
+                    "stats": {"opens": a["n"], "spent": a["sp"] / 100.0, "won": w["won"] / 100.0, "sold": sd["sold"] / 100.0,
+                              "best": ({"n": best["name"], "k": best["icon"], "v": best["value_cents"] / 100.0, "r": best["rar"], "b": best["bname"]} if best else None)},
+                    "hist": hist}
+        finally:
+            db.close()
+
     def request_deposit(self, pid, coin_id, amount, txid):
         db = self.wdb()
         try:
@@ -832,7 +1009,7 @@ class App:
         self.admin_file = os.path.join(self.dir, "admin.json")
         self.sess_file = os.path.join(self.dir, "sessions.json")
         self.guard = Guard()
-        self.players = Players(self.dir)
+        self.players = Players(self.dir, env)
 
     # sessions are stored hashed, so a leaked file cannot be used to sign in
     def sessions(self):
@@ -965,6 +1142,11 @@ class H(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             n = (parse_qs(urlparse(self.path).query).get("n") or [""])[0][:40]
             return self.send(200, {"free": app.players.name_free(n)})
+        if self.path == "/api/fair" or self.path == "/api/items":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, app.players.fair_view(p["id"]) if self.path == "/api/fair" else app.players.items_view(p["id"]))
         if self.path == "/api/wallet":
             p = app.players.session_player(self.pcookie_val())
             if not p:
@@ -1086,6 +1268,23 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 since = 0
             return self.send(200, app.players.chat_admin_sync(since, body.get("add"), body.get("modes")))
+        if self.path in ("/api/fair/cs", "/api/box/open", "/api/item/sell", "/api/item/ship"):
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            if self.path == "/api/fair/cs":
+                out, err = app.players.fair_set_cs(p["id"], body.get("cs"))
+            elif self.path == "/api/box/open":
+                if not app.players.open_lim.hit(p["id"]):
+                    return self.send(429, {"error": "Slow down a little and try again."})
+                out, err = app.players.open_box(p["id"], str(body.get("box", ""))[:80])
+            elif self.path == "/api/item/sell":
+                out, err = app.players.sell_item(p["id"], body.get("id"))
+            else:
+                out, err = app.players.ship_item(p["id"], body.get("id"), bool(body.get("on")))
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, out if isinstance(out, dict) and "ok" in out else {"ok": True, "fair": out})
         if self.path in ("/api/wallet/deposit", "/api/wallet/withdraw"):
             p = app.players.session_player(self.pcookie_val())
             if not p:
