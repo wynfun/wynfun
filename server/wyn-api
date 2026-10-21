@@ -10,6 +10,7 @@ Passwords are stored only as a salted scrypt hash. Nothing secret is in GitHub.
 """
 import base64, getpass, hashlib, hmac, json, os, re, secrets, shutil, sqlite3, struct, subprocess, sys, threading, time
 import urllib.request, urllib.error
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORTS = {"live": 8081, "staging": 8082}
@@ -179,6 +180,12 @@ def reset_mail(name, link):
     return text, html
 
 
+def wallet_mail(name, title, line):
+    text = "Hi %s,\n\n%s\n\nwyn.fun\n%s" % (name, line.replace("&amp;", "&"), footer_note())
+    html = email_html(title, ["Hi %s," % esc_html(name), line], ("Open your wallet", SITE), None, preheader=line[:90])
+    return text, html
+
+
 def base_url(env):
     c = mail_conf() or {}
     return (c.get("base_" + env) or ("https://wyn.fun" if env == "live" else "https://staging.wyn.fun")).rstrip("/")
@@ -225,6 +232,8 @@ class Players:
         self.login_id = Limiter(10, 900)
         self.name_lim = Limiter(60, 600)
         self.chat_lim = Limiter(90, 60)
+        self.dep_lim = Limiter(10, 3600)
+        self.wd_lim = Limiter(6, 3600)
         self.forgot_ip = Limiter(5, 3600)
         self.forgot_em = Limiter(3, 3600)
         self.reset_lim = Limiter(10, 900)
@@ -238,6 +247,15 @@ class Players:
         CREATE TABLE IF NOT EXISTS psessions(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, idle REAL NOT NULL, mx REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS ps_pid ON psessions(pid);
         CREATE TABLE IF NOT EXISTS resets(h TEXT PRIMARY KEY, pid INTEGER NOT NULL, exp REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS wallet_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, kind TEXT NOT NULL, cents INTEGER NOT NULL, bal_after INTEGER NOT NULL, ref TEXT, note TEXT, created REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS wl_pid ON wallet_ledger(pid, id);
+        CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, coin TEXT NOT NULL, network TEXT, claimed_cents INTEGER NOT NULL, txid TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', credited_cents INTEGER, created REAL NOT NULL, decided REAL, admin_note TEXT);
+        CREATE UNIQUE INDEX IF NOT EXISTS dep_tx ON deposits(txid);
+        CREATE INDEX IF NOT EXISTS dep_pid ON deposits(pid, id);
+        CREATE TABLE IF NOT EXISTS withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, coin TEXT NOT NULL, network TEXT, address TEXT NOT NULL, cents INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', txid TEXT, created REAL NOT NULL, decided REAL, admin_note TEXT);
+        CREATE INDEX IF NOT EXISTS wd_pid ON withdrawals(pid, id);
+        CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, who TEXT NOT NULL, action TEXT NOT NULL, detail TEXT);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
         INSERT OR IGNORE INTO meta(k,v) VALUES('chatseq',0);
         CREATE TABLE IF NOT EXISTS chat_threads(pid INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'ai', ru INTEGER NOT NULL DEFAULT 0, ra INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0, upd REAL);
@@ -245,6 +263,9 @@ class Players:
         CREATE INDEX IF NOT EXISTS cm_pid ON chat_msgs(pid, id);
         CREATE INDEX IF NOT EXISTS ct_seq ON chat_threads(seq);
         """)
+        cols = [r[1] for r in db.execute("PRAGMA table_info(players)")]
+        if "real_cents" not in cols:
+            db.execute("ALTER TABLE players ADD COLUMN real_cents INTEGER NOT NULL DEFAULT 0")
         db.commit()
         db.close()
         try:
@@ -514,6 +535,261 @@ class Players:
         finally:
             db.close()
 
+    # ----- wallet (real money ledger, amounts in cents) -----
+    ADDR = {
+        "btc": re.compile(r"^(bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$"),
+        "evm": re.compile(r"^0x[a-fA-F0-9]{40}$"),
+        "tron": re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$"),
+        "sol": re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"),
+    }
+    DEFAULTS = {"real_deposits": 0, "real_withdrawals": 0, "min_deposit": 20, "min_withdraw": 20, "coins": []}
+
+    def wdb(self):
+        c = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL")
+        return c
+
+    def settings(self, db=None):
+        own = db is None
+        db = db or self.db()
+        try:
+            out = dict(self.DEFAULTS)
+            for r in db.execute("SELECT k,v FROM settings"):
+                try:
+                    out[r["k"]] = json.loads(r["v"])
+                except Exception:
+                    pass
+            return out
+        finally:
+            if own:
+                db.close()
+
+    def audit(self, db, who, action, detail):
+        db.execute("INSERT INTO audit(ts,who,action,detail) VALUES(?,?,?,?)", (time.time(), who, action, json.dumps(detail)[:2000]))
+
+    @staticmethod
+    def cents(v, lo=0, hi=10_000_000):
+        try:
+            d = Decimal(str(v).strip()).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError):
+            return None
+        c = int(d * 100)
+        return c if lo < c <= hi * 100 else None
+
+    def _post(self, db, pid, kind, cents, ref="", note=""):
+        """Adds one ledger line and moves the balance in the same step. Call inside BEGIN IMMEDIATE."""
+        r = db.execute("SELECT real_cents FROM players WHERE id=?", (pid,)).fetchone()
+        nb = r["real_cents"] + cents
+        if nb < 0:
+            raise ValueError("not enough balance")
+        db.execute("UPDATE players SET real_cents=? WHERE id=?", (nb, pid))
+        db.execute("INSERT INTO wallet_ledger(pid,kind,cents,bal_after,ref,note,created) VALUES(?,?,?,?,?,?,?)", (pid, kind, cents, nb, ref, note[:300], time.time()))
+        return nb
+
+    def wallet_view(self, pid):
+        db = self.db()
+        try:
+            st = self.settings(db)
+            p = db.execute("SELECT real_cents FROM players WHERE id=?", (pid,)).fetchone()
+            coins = [{k: c.get(k) for k in ("id", "label", "network", "address", "addr_type")} for c in st["coins"] if c.get("enabled") and c.get("address")] if st["real_deposits"] or st["real_withdrawals"] else []
+            deps = [dict(r) for r in db.execute("SELECT id,coin,network,claimed_cents,txid,status,credited_cents,created,admin_note FROM deposits WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
+            wds = [dict(r) for r in db.execute("SELECT id,coin,network,address,cents,status,txid,created,admin_note FROM withdrawals WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
+            led = [dict(r) for r in db.execute("SELECT kind,cents,bal_after,note,created FROM wallet_ledger WHERE pid=? ORDER BY id DESC LIMIT 30", (pid,))]
+            return {"real_cents": p["real_cents"], "config": {"real_deposits": bool(st["real_deposits"]), "real_withdrawals": bool(st["real_withdrawals"]),
+                    "min_deposit": st["min_deposit"], "min_withdraw": st["min_withdraw"], "coins": coins}, "deposits": deps, "withdrawals": wds, "ledger": led}
+        finally:
+            db.close()
+
+    def request_deposit(self, pid, coin_id, amount, txid):
+        db = self.wdb()
+        try:
+            st = self.settings(db)
+            if not st["real_deposits"]:
+                return None, "Real deposits are not open yet."
+            coin = next((c for c in st["coins"] if c.get("id") == coin_id and c.get("enabled") and c.get("address")), None)
+            if not coin:
+                return None, "Please choose a payment method."
+            cents = self.cents(amount)
+            if cents is None or cents < int(float(st["min_deposit"]) * 100):
+                return None, "The smallest deposit is $%g." % st["min_deposit"]
+            tx = re.sub(r"\s+", "", str(txid))
+            if not re.match(r"^[A-Za-z0-9_\-:.]{16,128}$", tx):
+                return None, "Please paste the transaction hash (ID) from your wallet or exchange."
+            tx = tx.lower()
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("INSERT INTO deposits(pid,coin,network,claimed_cents,txid,created) VALUES(?,?,?,?,?,?)", (pid, coin["label"], coin.get("network", ""), cents, tx, time.time()))
+                db.execute("COMMIT")
+            except sqlite3.IntegrityError:
+                db.execute("ROLLBACK")
+                return None, "That transaction was already submitted."
+            return True, None
+        finally:
+            db.close()
+
+    def request_withdrawal(self, pid, coin_id, address, amount):
+        db = self.wdb()
+        try:
+            st = self.settings(db)
+            if not st["real_withdrawals"]:
+                return None, "Real withdrawals are not open yet."
+            coin = next((c for c in st["coins"] if c.get("id") == coin_id and c.get("enabled")), None)
+            if not coin:
+                return None, "Please choose a coin."
+            addr = str(address).strip()
+            rx = self.ADDR.get(coin.get("addr_type"))
+            if rx and not rx.match(addr):
+                return None, "That does not look like a valid %s address. Please check it." % coin["label"]
+            if not rx and not re.match(r"^[A-Za-z0-9:_\-.]{10,120}$", addr):
+                return None, "Please check the address."
+            cents = self.cents(amount)
+            if cents is None or cents < int(float(st["min_withdraw"]) * 100):
+                return None, "The smallest withdrawal is $%g." % st["min_withdraw"]
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                cur = db.execute("INSERT INTO withdrawals(pid,coin,network,address,cents,created) VALUES(?,?,?,?,?,?)", (pid, coin["label"], coin.get("network", ""), addr, cents, time.time()))
+                self._post(db, pid, "withdraw_hold", -cents, "W%d" % cur.lastrowid, "Withdrawal to %s" % coin["label"])
+                db.execute("COMMIT")
+            except ValueError:
+                db.execute("ROLLBACK")
+                return None, "You do not have enough balance."
+            return True, None
+        finally:
+            db.close()
+
+    def admin_wallet(self):
+        db = self.db()
+        try:
+            def rows(q, a=()):
+                return [dict(r) for r in db.execute(q, a)]
+            dep = rows("SELECT d.*, p.name, p.email FROM deposits d JOIN players p ON p.id=d.pid ORDER BY (d.status='pending') DESC, d.id DESC LIMIT 100")
+            wd = rows("SELECT w.*, p.name, p.email FROM withdrawals w JOIN players p ON p.id=w.pid ORDER BY (w.status='pending') DESC, w.id DESC LIMIT 100")
+            tot = db.execute("SELECT COALESCE(SUM(real_cents),0) s, COUNT(*) n FROM players WHERE real_cents<>0").fetchone()
+            bad = rows("SELECT p.id, p.email, p.real_cents, COALESCE((SELECT SUM(cents) FROM wallet_ledger l WHERE l.pid=p.id),0) AS ledger FROM players p WHERE p.real_cents <> COALESCE((SELECT SUM(cents) FROM wallet_ledger l WHERE l.pid=p.id),0)")
+            aud = rows("SELECT ts,who,action,detail FROM audit ORDER BY id DESC LIMIT 40")
+            return {"deposits": dep, "withdrawals": wd, "settings": self.settings(db), "held_cents": tot["s"], "holders": tot["n"], "mismatch": bad, "audit": aud}
+        finally:
+            db.close()
+
+    def admin_deposit(self, did, action, amount, note, who):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            d = db.execute("SELECT * FROM deposits WHERE id=?", (did,)).fetchone()
+            if not d or d["status"] != "pending":
+                db.execute("ROLLBACK")
+                return None, "That deposit was already handled."
+            if action == "approve":
+                cents = self.cents(amount)
+                if cents is None:
+                    db.execute("ROLLBACK")
+                    return None, "Enter the USD amount to credit."
+                db.execute("UPDATE deposits SET status='approved', credited_cents=?, decided=?, admin_note=? WHERE id=?", (cents, time.time(), note[:300], did))
+                self._post(db, d["pid"], "deposit", cents, "D%d" % did, "Deposit %s" % d["coin"])
+                self.audit(db, who, "deposit_approved", {"id": did, "cents": cents, "txid": d["txid"]})
+            else:
+                db.execute("UPDATE deposits SET status='rejected', decided=?, admin_note=? WHERE id=?", (time.time(), note[:300], did))
+                self.audit(db, who, "deposit_rejected", {"id": did, "note": note[:100]})
+            db.execute("COMMIT")
+            p = db.execute("SELECT name,email FROM players WHERE id=?", (d["pid"],)).fetchone()
+            return {"name": p["name"], "email": p["email"], "cents": d["claimed_cents"] if action != "approve" else cents}, None
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+
+    def admin_withdrawal(self, wid, action, txid, note, who):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            w = db.execute("SELECT * FROM withdrawals WHERE id=?", (wid,)).fetchone()
+            if not w or w["status"] != "pending":
+                db.execute("ROLLBACK")
+                return None, "That withdrawal was already handled."
+            if action == "paid":
+                tx = str(txid).strip()[:200]
+                if len(tx) < 8:
+                    db.execute("ROLLBACK")
+                    return None, "Enter the transaction hash of your payout."
+                db.execute("UPDATE withdrawals SET status='paid', txid=?, decided=?, admin_note=? WHERE id=?", (tx, time.time(), note[:300], wid))
+                self.audit(db, who, "withdrawal_paid", {"id": wid, "cents": w["cents"], "txid": tx})
+            else:
+                db.execute("UPDATE withdrawals SET status='rejected', decided=?, admin_note=? WHERE id=?", (time.time(), note[:300], wid))
+                self._post(db, w["pid"], "withdraw_refund", w["cents"], "W%d" % wid, "Withdrawal returned")
+                self.audit(db, who, "withdrawal_rejected", {"id": wid, "note": note[:100]})
+            db.execute("COMMIT")
+            p = db.execute("SELECT name,email FROM players WHERE id=?", (w["pid"],)).fetchone()
+            return {"name": p["name"], "email": p["email"], "cents": w["cents"], "coin": w["coin"]}, None
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+
+    def admin_adjust(self, email, amount, note, who):
+        sign = -1 if str(amount).strip().startswith("-") else 1
+        cents = self.cents(str(amount).strip().lstrip("-+"))
+        if cents is None or not note.strip():
+            return None, "Enter an amount and a reason."
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            p = db.execute("SELECT id FROM players WHERE email=?", (email.strip().lower(),)).fetchone()
+            if not p:
+                db.execute("ROLLBACK")
+                return None, "No player with that email."
+            try:
+                self._post(db, p["id"], "adjustment", sign * cents, "", note)
+            except ValueError:
+                db.execute("ROLLBACK")
+                return None, "That would make the balance negative."
+            self.audit(db, who, "adjustment", {"email": email, "cents": sign * cents, "note": note[:100]})
+            db.execute("COMMIT")
+            return True, None
+        finally:
+            db.close()
+
+    def admin_settings(self, data, who):
+        coins = []
+        for c in (data.get("coins") or [])[:20]:
+            if not isinstance(c, dict):
+                continue
+            cid = re.sub(r"[^a-z0-9_\-]", "", str(c.get("id", "")).lower())[:30]
+            addr = str(c.get("address", "")).strip()[:120]
+            at = c.get("addr_type") if c.get("addr_type") in ("btc", "evm", "tron", "sol", "other") else "other"
+            rx = self.ADDR.get(at)
+            if not cid or not str(c.get("label", "")).strip():
+                return None, "Every coin needs a short id and a name."
+            if addr and rx and not rx.match(addr):
+                return None, "The address for %s does not look right for its type." % c.get("label")
+            coins.append({"id": cid, "label": str(c["label"]).strip()[:30], "network": str(c.get("network", "")).strip()[:30], "address": addr, "addr_type": at, "enabled": bool(c.get("enabled"))})
+        vals = {"real_deposits": 1 if data.get("real_deposits") else 0, "real_withdrawals": 1 if data.get("real_withdrawals") else 0, "coins": coins}
+        for k in ("min_deposit", "min_withdraw"):
+            try:
+                vals[k] = max(1, min(100000, float(data.get(k))))
+            except Exception:
+                return None, "Minimums must be numbers."
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            old = self.settings(db)
+            for k, v in vals.items():
+                db.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, json.dumps(v)))
+            self.audit(db, who, "settings", {"changed_addresses": [c["id"] for c in coins if next((o for o in old["coins"] if o.get("id") == c["id"] and o.get("address") == c["address"]), None) is None],
+                                              "real_deposits": vals["real_deposits"], "real_withdrawals": vals["real_withdrawals"]})
+            db.execute("COMMIT")
+            return True, None
+        finally:
+            db.close()
+
     def public(self, p):
         return {"name": p["name"], "email": p["email"], "created": p["created"],
                 "state": json.loads(p["state"]) if p["state"] else None, "ver": p["ver"]}
@@ -689,6 +965,15 @@ class H(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             n = (parse_qs(urlparse(self.path).query).get("n") or [""])[0][:40]
             return self.send(200, {"free": app.players.name_free(n)})
+        if self.path == "/api/wallet":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, app.players.wallet_view(p["id"]))
+        if self.path == "/api/admin/wallet":
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, app.players.admin_wallet())
         if self.path == "/api/admin/players":
             if not self.admin_ok():
                 return self.send(401, {"error": "sign in"})
@@ -801,6 +1086,49 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 since = 0
             return self.send(200, app.players.chat_admin_sync(since, body.get("add"), body.get("modes")))
+        if self.path in ("/api/wallet/deposit", "/api/wallet/withdraw"):
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            dep = self.path.endswith("deposit")
+            if not (app.players.dep_lim if dep else app.players.wd_lim).hit(p["id"]):
+                return self.send(429, {"error": "Too many requests. Please try again later."})
+            if dep:
+                ok, err = app.players.request_deposit(p["id"], str(body.get("coin", ""))[:40], body.get("amount"), body.get("txid", ""))
+            else:
+                ok, err = app.players.request_withdrawal(p["id"], str(body.get("coin", ""))[:40], body.get("address", ""), body.get("amount"))
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, {"ok": True, "wallet": app.players.wallet_view(p["id"])})
+        if self.path.startswith("/api/admin/wallet/"):
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            who = "admin"
+            act = self.path.rsplit("/", 1)[1]
+            note = str(body.get("note", ""))[:300]
+            if act == "deposit":
+                r, err = app.players.admin_deposit(int(body.get("id") or 0), body.get("action"), body.get("amount"), note, who)
+                if r and mail_conf():
+                    if body.get("action") == "approve":
+                        send_async(r["email"], "Your deposit was added", *wallet_mail(r["name"], "Deposit added", "Your deposit of $%.2f was confirmed and added to your wallet." % (r["cents"] / 100)))
+                    else:
+                        send_async(r["email"], "About your deposit", *wallet_mail(r["name"], "Deposit not confirmed", "We could not confirm your deposit. %s If you think this is a mistake, please contact support in the chat." % esc_html(note)))
+            elif act == "withdrawal":
+                r, err = app.players.admin_withdrawal(int(body.get("id") or 0), body.get("action"), body.get("txid", ""), note, who)
+                if r and mail_conf():
+                    if body.get("action") == "paid":
+                        send_async(r["email"], "Your withdrawal was sent", *wallet_mail(r["name"], "Withdrawal sent", "Your withdrawal of $%.2f in %s was sent." % (r["cents"] / 100, esc_html(r["coin"]))))
+                    else:
+                        send_async(r["email"], "About your withdrawal", *wallet_mail(r["name"], "Withdrawal returned", "Your withdrawal could not be sent and $%.2f was returned to your wallet. %s" % (r["cents"] / 100, esc_html(note))))
+            elif act == "adjust":
+                r, err = app.players.admin_adjust(str(body.get("email", "")), body.get("amount"), note, who)
+            elif act == "settings":
+                r, err = app.players.admin_settings(body, who)
+            else:
+                return self.send(404, {"error": "not found"})
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, {"ok": True, "wallet": app.players.admin_wallet()})
         if self.path == "/api/admin/logout":
             app.end_session(self.cookie_val())
             return self.send(200, {"ok": True}, self.set_cookie("", 0))
