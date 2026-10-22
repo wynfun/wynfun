@@ -122,7 +122,7 @@ NP_LABELS = {
     "sol": ("Solana", "Solana"), "trx": ("Tron", "Tron"), "xrp": ("XRP", "XRP Ledger"), "bnbbsc": ("BNB", "BNB Smart Chain"),
     "usdttrc20": ("Tether USDT", "Tron (TRC20)"), "usdterc20": ("Tether USDT", "Ethereum (ERC20)"), "usdtbsc": ("Tether USDT", "BNB Smart Chain"),
     "usdtsol": ("Tether USDT", "Solana"), "usdtmatic": ("Tether USDT", "Polygon"), "usdtarb": ("Tether USDT", "Arbitrum"),
-    "usdcerc20": ("USD Coin", "Ethereum (ERC20)"), "usdcsol": ("USD Coin", "Solana"), "usdcmatic": ("USD Coin", "Polygon"), "usdcbsc": ("USD Coin", "BNB Smart Chain"),
+    "usdc": ("USD Coin", "Ethereum (ERC20)"), "btclightning": ("Bitcoin", "Lightning"), "usdcerc20": ("USD Coin", "Ethereum (ERC20)"), "usdcsol": ("USD Coin", "Solana"), "usdcmatic": ("USD Coin", "Polygon"), "usdcbsc": ("USD Coin", "BNB Smart Chain"),
 }
 
 def np_conf():
