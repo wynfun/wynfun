@@ -125,6 +125,10 @@ NP_LABELS = {
     "usdc": ("USD Coin", "Ethereum (ERC20)"), "btclightning": ("Bitcoin", "Lightning"), "usdcerc20": ("USD Coin", "Ethereum (ERC20)"), "usdcsol": ("USD Coin", "Solana"), "usdcmatic": ("USD Coin", "Polygon"), "usdcbsc": ("USD Coin", "BNB Smart Chain"),
 }
 
+NP_ATYPE = {"btc": "btc", "eth": "evm", "usdterc20": "evm", "usdc": "evm", "usdcerc20": "evm", "bnbbsc": "evm", "usdtbsc": "evm", "usdcbsc": "evm",
+            "usdtmatic": "evm", "usdcmatic": "evm", "usdtarb": "evm", "usdttrc20": "tron", "trx": "tron", "sol": "sol", "usdcsol": "sol", "usdtsol": "sol",
+            "ltc": None, "doge": None, "xrp": None}
+
 def np_conf():
     c = read_json(os.path.join(NP_DIR, "nowpay-%s.json" % NP_ENV[0]), None)
     return c if isinstance(c, dict) and c.get("api_key") and c.get("ipn_secret") else None
@@ -662,13 +666,18 @@ class Players:
         try:
             st = self.settings(db)
             p = db.execute("SELECT real_cents FROM players WHERE id=?", (pid,)).fetchone()
-            coins = [{k: c.get(k) for k in ("id", "label", "network", "address", "addr_type")} for c in st["coins"] if c.get("enabled") and c.get("address")] if st["real_deposits"] or st["real_withdrawals"] else []
+            if not (st["real_deposits"] or st["real_withdrawals"]):
+                coins = []
+            elif np_conf():
+                coins = [{k: c.get(k) for k in ("id", "label", "network", "address", "addr_type")} for c in self.np_wcoins()]
+            else:
+                coins = [{k: c.get(k) for k in ("id", "label", "network", "address", "addr_type")} for c in st["coins"] if c.get("enabled") and c.get("address")]
             nps = [dict(r) for r in db.execute("SELECT oid,coin,cents,got,addr,amt,extra,status,created,exp FROM nowpay WHERE pid=? ORDER BY id DESC LIMIT 5", (pid,))]
             deps = [dict(r) for r in db.execute("SELECT id,coin,network,claimed_cents,txid,status,credited_cents,created,admin_note FROM deposits WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
             wds = [dict(r) for r in db.execute("SELECT id,coin,network,address,cents,status,txid,created,admin_note FROM withdrawals WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
             led = [dict(r) for r in db.execute("SELECT kind,cents,bal_after,note,created FROM wallet_ledger WHERE pid=? ORDER BY id DESC LIMIT 30", (pid,))]
             return {"real_cents": p["real_cents"], "config": {"real_deposits": bool(st["real_deposits"]), "real_withdrawals": bool(st["real_withdrawals"]),
-                    "min_deposit": st["min_deposit"], "min_withdraw": st["min_withdraw"], "coins": coins, "nowpay": bool(np_conf() and st["real_deposits"])}, "nowpay": nps, "deposits": deps, "withdrawals": wds, "ledger": led}
+                    "min_deposit": st["min_deposit"], "min_withdraw": st["min_withdraw"], "coins": coins, "nowpay": bool(np_conf() and st["real_deposits"]), "npconf": bool(np_conf())}, "nowpay": nps, "deposits": deps, "withdrawals": wds, "ledger": led}
         finally:
             db.close()
 
@@ -1428,6 +1437,14 @@ class Players:
         self._npc = (now, out)
         return out
 
+    def np_wcoins(self):
+        """Withdrawal coins when NOWPayments is connected: the same coins that are switched on for deposits."""
+        out = []
+        for c in self.np_coins():
+            if c["id"] in NP_ATYPE:
+                out.append({"id": c["id"], "label": c["label"], "network": c["network"], "address": "-", "addr_type": NP_ATYPE[c["id"]], "enabled": True})
+        return out
+
     def np_create(self, pid, code, amount):
         st = self.settings()
         if not st["real_deposits"]:
@@ -1562,7 +1579,8 @@ class Players:
             st = self.settings(db)
             if not st["real_withdrawals"]:
                 return None, "Real withdrawals are not open yet."
-            coin = next((c for c in st["coins"] if c.get("id") == coin_id and c.get("enabled")), None)
+            pool = self.np_wcoins() if np_conf() else st["coins"]
+            coin = next((c for c in pool if c.get("id") == coin_id and c.get("enabled")), None)
             if not coin:
                 return None, "Please choose a coin."
             addr = str(address).strip()
