@@ -332,6 +332,8 @@ class Players:
         CREATE INDEX IF NOT EXISTS ct_seq ON chat_threads(seq);
         """)
         cols = [r[1] for r in db.execute("PRAGMA table_info(players)")]
+        if "got" not in [r[1] for r in db.execute("PRAGMA table_info(nowpay)")]:
+            db.execute("ALTER TABLE nowpay ADD COLUMN got INTEGER NOT NULL DEFAULT 0")
         if "real_cents" not in cols:
             db.execute("ALTER TABLE players ADD COLUMN real_cents INTEGER NOT NULL DEFAULT 0")
         db.commit()
@@ -661,7 +663,7 @@ class Players:
             st = self.settings(db)
             p = db.execute("SELECT real_cents FROM players WHERE id=?", (pid,)).fetchone()
             coins = [{k: c.get(k) for k in ("id", "label", "network", "address", "addr_type")} for c in st["coins"] if c.get("enabled") and c.get("address")] if st["real_deposits"] or st["real_withdrawals"] else []
-            nps = [dict(r) for r in db.execute("SELECT oid,coin,cents,addr,amt,extra,status,created,exp FROM nowpay WHERE pid=? ORDER BY id DESC LIMIT 5", (pid,))]
+            nps = [dict(r) for r in db.execute("SELECT oid,coin,cents,got,addr,amt,extra,status,created,exp FROM nowpay WHERE pid=? ORDER BY id DESC LIMIT 5", (pid,))]
             deps = [dict(r) for r in db.execute("SELECT id,coin,network,claimed_cents,txid,status,credited_cents,created,admin_note FROM deposits WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
             wds = [dict(r) for r in db.execute("SELECT id,coin,network,address,cents,status,txid,created,admin_note FROM withdrawals WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
             led = [dict(r) for r in db.execute("SELECT kind,cents,bal_after,note,created FROM wallet_ledger WHERE pid=? ORDER BY id DESC LIMIT 30", (pid,))]
@@ -1469,8 +1471,55 @@ class Players:
         finally:
             db.close()
 
+    def np_apply(self, db, r, j):
+        """Applies NOWPayments' own record of a payment (j) to our order row r. Credits only the difference not yet credited."""
+        status = str(j.get("payment_status", "")).lower()
+        oid = r["oid"]
+        target, newst = None, None
+        if status == "finished":
+            target, newst = r["cents"], "credited"
+        elif status == "partially_paid":
+            try:
+                ratio = float(j.get("actually_paid")) / float(j.get("pay_amount"))
+            except Exception:
+                ratio = 0
+            if ratio >= 0.97:
+                target, newst = r["cents"], "credited"
+            else:
+                target, newst = max(0, int(r["cents"] * max(ratio, 0))), "partial"
+        else:
+            newst = {"failed": "failed", "refunded": "failed", "expired": "expired", "waiting": "waiting", "confirming": "confirming",
+                     "confirmed": "confirming", "sending": "confirming"}.get(status)
+        if target is not None and target > (r["got"] or 0):
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                r2 = db.execute("SELECT got FROM nowpay WHERE oid=?", (oid,)).fetchone()
+                delta = target - (r2["got"] or 0)
+                if delta > 0:
+                    lab, net = NP_LABELS.get(r["coin"], (r["coin"].upper(), ""))
+                    self._post(db, r["pid"], "deposit", delta, "NP%s" % r["npid"], "Deposit %s" % lab)
+                    ex = db.execute("SELECT id FROM deposits WHERE txid=?", ("np:" + r["npid"],)).fetchone()
+                    if ex:
+                        db.execute("UPDATE deposits SET credited_cents=credited_cents+?, decided=? WHERE id=?", (delta, time.time(), ex["id"]))
+                    else:
+                        db.execute("INSERT INTO deposits(pid,coin,network,claimed_cents,txid,status,credited_cents,created,decided,admin_note) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                   (r["pid"], lab, net, r["cents"], "np:" + r["npid"], "approved", delta, r["created"], time.time(), "Automatic (NOWPayments)"))
+                    db.execute("UPDATE nowpay SET got=? WHERE oid=?", (target, oid))
+                    self.audit(db, "nowpayments", "deposit_credited" if newst == "credited" else "deposit_partial_credited",
+                               {"order": oid, "added_cents": delta, "order_cents": r["cents"], "coin": r["coin"], "payment": r["npid"], "paid": str(j.get("actually_paid", ""))[:30], "expected": str(j.get("pay_amount", ""))[:30]})
+                db.execute("COMMIT")
+            except Exception:
+                try:
+                    db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        if newst and r["status"] != "credited":
+            db.execute("UPDATE nowpay SET status=?, upd=? WHERE oid=?", (newst, time.time(), oid))
+        return newst
+
     def np_ipn(self, p):
-        """Handles one signed callback. Returns (http_code, text). Credits the wallet at most once."""
+        """Handles one signed callback. Returns (http_code, text). Money always comes from NOWPayments' own record, never from the callback."""
         oid = str(p.get("order_id", ""))
         npid = str(p.get("payment_id", ""))
         status = str(p.get("payment_status", "")).lower()
@@ -1480,40 +1529,30 @@ class Players:
             if not r or (r["npid"] and npid and r["npid"] != npid):
                 sys.stderr.write("nowpayments callback for an unknown order: %s\n" % oid[:60])
                 return 200, "ignored"
-            if r["status"] == "credited":
-                return 200, "already done"
-            if status == "finished":
+            if status in ("finished", "partially_paid"):
                 j, err = np_call("GET", "/payment/%s" % r["npid"])
-                if err or not isinstance(j, dict) or str(j.get("payment_status", "")).lower() != "finished" or str(j.get("order_id", "")) != oid:
+                if err or not isinstance(j, dict) or str(j.get("order_id", "")) != oid:
                     sys.stderr.write("nowpayments could not confirm %s: %s\n" % (oid[:60], err or str(j)[:120]))
                     return 503, "could not confirm, retry"
-                try:
-                    db.execute("BEGIN IMMEDIATE")
-                    r2 = db.execute("SELECT status FROM nowpay WHERE oid=?", (oid,)).fetchone()
-                    if r2["status"] == "credited":
-                        db.execute("ROLLBACK")
-                        return 200, "already done"
-                    db.execute("UPDATE nowpay SET status='credited', upd=? WHERE oid=?", (time.time(), oid))
-                    lab = NP_LABELS.get(r["coin"], (r["coin"].upper(), ""))[0]
-                    db.execute("INSERT INTO deposits(pid,coin,network,claimed_cents,txid,status,credited_cents,created,decided,admin_note) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                               (r["pid"], lab, NP_LABELS.get(r["coin"], ("", ""))[1], r["cents"], "np:" + r["npid"], "approved", r["cents"], r["created"], time.time(), "Automatic (NOWPayments)"))
-                    self._post(db, r["pid"], "deposit", r["cents"], "NP%s" % r["npid"], "Deposit %s" % lab)
-                    self.audit(db, "nowpayments", "deposit_credited", {"order": oid, "cents": r["cents"], "coin": r["coin"], "payment": r["npid"]})
-                    db.execute("COMMIT")
-                except Exception:
-                    try:
-                        db.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
-                return 200, "credited"
-            m = {"partially_paid": "partial", "failed": "failed", "expired": "expired", "refunded": "failed",
-                 "waiting": "waiting", "confirming": "confirming", "confirmed": "confirming", "sending": "confirming"}.get(status)
-            if m:
-                db.execute("UPDATE nowpay SET status=?, upd=? WHERE oid=? AND status<>'credited'", (m, time.time(), oid))
-                if m == "partial":
-                    self.audit(db, "nowpayments", "deposit_partial", {"order": oid, "expected_cents": r["cents"], "paid": str(p.get("actually_paid", ""))[:30], "coin": r["coin"], "payment": r["npid"]})
+                return 200, "applied " + str(self.np_apply(db, r, j))
+            if r["status"] != "credited":
+                self.np_apply(db, r, {"payment_status": status})
             return 200, "ok"
+        finally:
+            db.close()
+
+    def np_sync(self):
+        """Safety net: asks NOWPayments about every open order (also catches callbacks we never received)."""
+        if not np_conf():
+            return
+        db = self.wdb()
+        try:
+            rows = db.execute("SELECT * FROM nowpay WHERE status IN ('waiting','confirming','partial') AND created>? AND npid IS NOT NULL ORDER BY id LIMIT 50", (time.time() - 3 * 86400,)).fetchall()
+            for r in rows:
+                j, err = np_call("GET", "/payment/%s" % r["npid"])
+                if err or not isinstance(j, dict) or str(j.get("order_id", "")) != r["oid"]:
+                    continue
+                self.np_apply(db, r, j)
         finally:
             db.close()
 
@@ -2257,6 +2296,14 @@ def serve(env):
     port = int(os.environ.get("WYN_PORT") or PORTS[env])
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     srv.app = App(env)
+    def np_loop():
+        while True:
+            time.sleep(float(os.environ.get("WYN_NP_POLL") or 60))
+            try:
+                srv.app.players.np_sync()
+            except Exception as e:
+                sys.stderr.write("nowpayments sync failed: %s\n" % str(e)[:200])
+    threading.Thread(target=np_loop, daemon=True).start()
     print("wyn-api %s listening on 127.0.0.1:%d" % (env, port), flush=True)
     srv.serve_forever()
 
