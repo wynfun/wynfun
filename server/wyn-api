@@ -238,6 +238,22 @@ def base_url(env):
     return (c.get("base_" + env) or ("https://wyn.fun" if env == "live" else "https://staging.wyn.fun")).rstrip("/")
 
 
+# ---------- rewards (Gems) ----------
+RW_GEM_CENTS = 200          # 1 Gem is worth $2 of rewards. Players earn 1 Gem per $100 spent on boxes, and per $100 their friends deposit (2% back).
+RW_UNIT = 100               # we count in hundredths of a Gem
+RW_MIN_CASH = 500           # smallest cash-out: 5 Gems
+RW_PRIZES = [
+    {"id": "z0", "n": "WHOOP 5.0 band, black", "k": "watch", "v": 239, "s": 20, "img": "img/pz-whoop.png"},
+    {"id": "z1", "n": "Herm\u00e8s Bouncing sneakers", "k": "shoe", "v": 1125, "s": 10, "img": "img/pz-shoes.png"},
+    {"id": "z7", "n": "Cartier Panth\u00e8re rimless sunglasses, gold", "k": "glasses", "v": 1345, "s": 6, "img": "img/pz-sun.png"},
+    {"id": "z2", "n": "Cartier LOVE ring, yellow gold with diamonds", "k": "ring", "v": 4600, "s": 5, "img": "img/pz-ring.png"},
+    {"id": "z3", "n": "Herm\u00e8s Hac \u00e0 Dos PM backpack, black", "k": "bag", "v": 11300, "s": 3, "img": "img/pz-bag.png"},
+    {"id": "z4", "n": "Rolex Submariner Date, green", "k": "watch", "v": 20000, "s": 2, "img": "img/pz-rolex.png"},
+    {"id": "z5", "n": "BMW M4 Competition", "k": "car", "v": 86400, "s": 1, "img": "img/pz-bmw.png"},
+    {"id": "z8", "n": "Lamborghini Urus SE", "k": "car", "v": 262631, "s": 1, "img": "img/pz-urus.png"},
+    {"id": "z9", "n": "Lamborghini Revuelto", "k": "car", "v": 612852, "s": 1, "img": "img/pz-rev.png"},
+]
+
 # ---------- players ----------
 PCOOKIE = "__Host-wyn_player"
 PSESSION_IDLE = 30 * 24 * 3600
@@ -318,6 +334,12 @@ class Players:
         CREATE INDEX IF NOT EXISTS wd_pid ON withdrawals(pid, id);
         CREATE TABLE IF NOT EXISTS nowpay(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, oid TEXT NOT NULL UNIQUE, npid TEXT, coin TEXT NOT NULL, cents INTEGER NOT NULL, addr TEXT, amt TEXT, extra TEXT, status TEXT NOT NULL DEFAULT 'waiting', created REAL NOT NULL, upd REAL, exp REAL);
         CREATE INDEX IF NOT EXISTS np_pid ON nowpay(pid, id);
+        CREATE TABLE IF NOT EXISTS rw_ref(pid INTEGER PRIMARY KEY, ref INTEGER NOT NULL, created REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS rwr_ref ON rw_ref(ref);
+        CREATE TABLE IF NOT EXISTS rw_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, kind TEXT NOT NULL, units INTEGER NOT NULL, note TEXT, created REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS rwl_pid ON rw_ledger(pid);
+        CREATE TABLE IF NOT EXISTS rw_req(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, prize TEXT NOT NULL, pname TEXT NOT NULL, units INTEGER NOT NULL, addr TEXT, status TEXT NOT NULL DEFAULT 'requested', created REAL NOT NULL, decided REAL, note TEXT);
+        CREATE INDEX IF NOT EXISTS rwq_pid ON rw_req(pid, id);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, who TEXT NOT NULL, action TEXT NOT NULL, detail TEXT);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS fair(pid INTEGER PRIMARY KEY, seed TEXT NOT NULL, cs TEXT NOT NULL, nonce INTEGER NOT NULL DEFAULT 0, last TEXT);
@@ -336,6 +358,9 @@ class Players:
         CREATE INDEX IF NOT EXISTS ct_seq ON chat_threads(seq);
         """)
         cols = [r[1] for r in db.execute("PRAGMA table_info(players)")]
+        if "refcode" not in cols:
+            db.execute("ALTER TABLE players ADD COLUMN refcode TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS pl_refcode ON players(refcode)")
         if "got" not in [r[1] for r in db.execute("PRAGMA table_info(nowpay)")]:
             db.execute("ALTER TABLE nowpay ADD COLUMN got INTEGER NOT NULL DEFAULT 0")
         if "real_cents" not in cols:
@@ -353,7 +378,7 @@ class Players:
         c.execute("PRAGMA journal_mode=WAL")
         return c
 
-    def signup(self, name, email, password, state):
+    def signup(self, name, email, password, state, ref=None):
         name, email = name.strip(), email.strip().lower()
         if not NAME_RE.match(name):
             return None, "Username needs 3 to 20 letters, numbers or underscores."
@@ -377,8 +402,14 @@ class Players:
                 return None, "That username is taken. Try another one."
             cur = db.execute("INSERT INTO players(name,name_l,email,salt,hash,created,last_login,state,ver,upd) VALUES(?,?,?,?,?,?,?,?,?,?)",
                              (name, name.lower(), email, salt, h, now, now, json.dumps(st) if st else None, 1 if st else 0, now))
+            pid = cur.lastrowid
+            rc = re.sub(r"[^A-Za-z0-9]", "", str(ref or ""))[:12].upper()
+            if rc:
+                o = db.execute("SELECT id FROM players WHERE refcode=?", (rc,)).fetchone()
+                if o and o["id"] != pid:
+                    db.execute("INSERT OR IGNORE INTO rw_ref(pid,ref,created) VALUES(?,?,?)", (pid, o["id"], now))
             db.commit()
-            return cur.lastrowid, None
+            return pid, None
         except sqlite3.IntegrityError:
             return None, "That username or email is already used."
         finally:
@@ -1573,6 +1604,228 @@ class Players:
         finally:
             db.close()
 
+    # ---------- rewards (Gems) ----------
+    def rw_cfg(self, db):
+        raw = {}
+        r = db.execute("SELECT v FROM settings WHERE k='rw'").fetchone()
+        if r:
+            try:
+                raw = json.loads(r["v"])
+            except Exception:
+                raw = {}
+        pz = []
+        for p in RW_PRIZES:
+            o = (raw.get("prizes") or {}).get(p["id"]) or {}
+            pz.append({"id": p["id"], "n": p["n"], "k": p["k"], "v": p["v"], "img": p["img"], "s": int(o.get("s", p["s"])), "on": 0 if o.get("on") == 0 else 1,
+                       "cost": max(1, -(-int(p["v"] * 100) * RW_UNIT // RW_GEM_CENTS))})
+        return {"on": 0 if raw.get("on") == 0 else 1, "prizes": pz}
+
+    def rw_code(self, db, pid):
+        r = db.execute("SELECT refcode FROM players WHERE id=?", (pid,)).fetchone()
+        if r and r["refcode"]:
+            return r["refcode"]
+        for _ in range(20):
+            c = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(7))
+            try:
+                db.execute("UPDATE players SET refcode=? WHERE id=?", (c, pid))
+                return c
+            except sqlite3.IntegrityError:
+                continue
+        return ""
+
+    def rw_balance(self, db, pid):
+        spent = db.execute("SELECT COALESCE(SUM(price_cents),0) FROM opens WHERE pid=?", (pid,)).fetchone()[0]
+        box = spent // 100
+        refs = []
+        ru = 0
+        for r in db.execute("SELECT r.pid, r.created, p.name FROM rw_ref r JOIN players p ON p.id=r.pid WHERE r.ref=? ORDER BY r.created DESC", (pid,)):
+            dep = db.execute("SELECT COALESCE(SUM(cents),0) FROM wallet_ledger WHERE pid=? AND kind='deposit'", (r["pid"],)).fetchone()[0]
+            u = dep // 100
+            ru += u
+            refs.append({"n": r["name"], "dep": dep, "units": u, "t": r["created"]})
+        bonus = db.execute("SELECT COALESCE(SUM(units),0) FROM rw_ledger WHERE pid=? AND units>0", (pid,)).fetchone()[0]
+        used = -db.execute("SELECT COALESCE(SUM(units),0) FROM rw_ledger WHERE pid=? AND units<0", (pid,)).fetchone()[0]
+        return {"spent": spent, "box": box, "ref": ru, "bonus": bonus, "used": used, "bal": box + ru + bonus - used, "refs": refs}
+
+    def rw_view(self, pid):
+        db = self.wdb()
+        try:
+            cfg = self.rw_cfg(db)
+            code = self.rw_code(db, pid)
+            b = self.rw_balance(db, pid)
+            reqs = [dict(r) for r in db.execute("SELECT id,pname,units,status,created,note FROM rw_req WHERE pid=? ORDER BY id DESC LIMIT 30", (pid,))]
+            return {"on": bool(cfg["on"]), "code": code, "link": base_url(NP_ENV[0]) + "/?ref=" + code, "gem": RW_GEM_CENTS, "unit": RW_UNIT, "min_cash": RW_MIN_CASH,
+                    "spent": b["spent"], "box": b["box"], "refu": b["ref"], "bonus": b["bonus"], "used": b["used"], "bal": b["bal"], "refs": b["refs"],
+                    "prizes": [p for p in cfg["prizes"] if p["on"]], "reqs": reqs}
+        finally:
+            db.close()
+
+    def rw_redeem(self, pid, prize_id):
+        db = self.wdb()
+        try:
+            cfg = self.rw_cfg(db)
+            if not cfg["on"]:
+                return None, "Rewards are taking a short break."
+            pz = next((p for p in cfg["prizes"] if p["id"] == str(prize_id) and p["on"]), None)
+            if not pz:
+                return None, "That prize is not available."
+            p = db.execute("SELECT name,state FROM players WHERE id=?", (pid,)).fetchone()
+            addr = {}
+            try:
+                addr = (json.loads(p["state"] or "{}").get("user") or {}).get("addr") or {}
+            except Exception:
+                addr = {}
+            if not (str(addr.get("l1", "")).strip() and str(addr.get("ci", "")).strip() and str(addr.get("n", "")).strip()):
+                return None, "ADDRESS"
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                cfg = self.rw_cfg(db)
+                pz = next(x for x in cfg["prizes"] if x["id"] == pz["id"])
+                if pz["s"] <= 0:
+                    db.execute("ROLLBACK")
+                    return None, "That prize is all claimed for now."
+                b = self.rw_balance(db, pid)
+                if b["bal"] < pz["cost"]:
+                    db.execute("ROLLBACK")
+                    return None, "You need more Gems for that one."
+                raw = {}
+                r = db.execute("SELECT v FROM settings WHERE k='rw'").fetchone()
+                if r:
+                    raw = json.loads(r["v"])
+                raw.setdefault("prizes", {}).setdefault(pz["id"], {})["s"] = pz["s"] - 1
+                db.execute("INSERT OR REPLACE INTO settings(k,v) VALUES('rw',?)", (json.dumps(raw),))
+                db.execute("INSERT INTO rw_ledger(pid,kind,units,note,created) VALUES(?,?,?,?,?)", (pid, "prize", -pz["cost"], pz["n"], time.time()))
+                db.execute("INSERT INTO rw_req(pid,prize,pname,units,addr,created) VALUES(?,?,?,?,?,?)", (pid, pz["id"], pz["n"], pz["cost"], json.dumps({k: str(addr.get(k, ""))[:120] for k in ("n", "ci", "pc", "p", "l1", "l2", "city", "st", "z")}), time.time()))
+                self.audit(db, p["name"], "rewards_prize_requested", {"prize": pz["n"], "units": pz["cost"]})
+                db.execute("COMMIT")
+            except Exception:
+                try:
+                    db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        finally:
+            db.close()
+        return {"ok": True}, None
+
+    def rw_cash(self, pid, units):
+        try:
+            units = int(units)
+        except Exception:
+            return None, "Enter how many Gems."
+        db = self.wdb()
+        try:
+            if not self.rw_cfg(db)["on"]:
+                return None, "Rewards are taking a short break."
+            if units < RW_MIN_CASH:
+                return None, "The lowest amount is %g Gems." % (RW_MIN_CASH / RW_UNIT)
+            cents = units * RW_GEM_CENTS // RW_UNIT
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                b = self.rw_balance(db, pid)
+                if units > b["bal"]:
+                    db.execute("ROLLBACK")
+                    return None, "You do not have that many Gems."
+                db.execute("INSERT INTO rw_ledger(pid,kind,units,note,created) VALUES(?,?,?,?,?)", (pid, "cash", -units, "Turned into balance", time.time()))
+                self._post(db, pid, "reward", cents, "RW", "Gems turned into balance")
+                self.audit(db, "player %d" % pid, "rewards_cash", {"units": units, "cents": cents})
+                db.execute("COMMIT")
+            except Exception:
+                try:
+                    db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        finally:
+            db.close()
+        return {"ok": True, "cents": cents}, None
+
+    def rw_admin(self, db):
+        cfg = self.rw_cfg(db)
+        reqs = [dict(r) for r in db.execute("SELECT q.id,q.pid,q.prize,q.pname,q.units,q.addr,q.status,q.created,q.decided,q.note,p.name,p.email FROM rw_req q JOIN players p ON p.id=q.pid ORDER BY (q.status='requested') DESC, q.id DESC LIMIT 100")]
+        issued = 0
+        outst = 0
+        top = []
+        for p in db.execute("SELECT id,name FROM players"):
+            b = self.rw_balance(db, p["id"])
+            e = b["box"] + b["ref"] + b["bonus"]
+            issued += e
+            outst += b["bal"]
+            if b["refs"]:
+                top.append({"name": p["name"], "friends": len(b["refs"]), "dep": sum(x["dep"] for x in b["refs"]), "units": b["ref"]})
+        top.sort(key=lambda x: -x["dep"])
+        return {"on": bool(cfg["on"]), "prizes": cfg["prizes"], "reqs": reqs, "issued": issued, "outstanding": outst, "gem": RW_GEM_CENTS, "unit": RW_UNIT, "top": top[:20]}
+
+    def admin_rw_req(self, rid, action, note, who):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            q = db.execute("SELECT * FROM rw_req WHERE id=?", (rid,)).fetchone()
+            if not q or q["status"] in ("shipped", "declined"):
+                db.execute("ROLLBACK")
+                return None, "That request was already handled."
+            if action == "preparing":
+                db.execute("UPDATE rw_req SET status='preparing', decided=?, note=? WHERE id=?", (time.time(), str(note or "")[:300], rid))
+            elif action == "shipped":
+                db.execute("UPDATE rw_req SET status='shipped', decided=?, note=? WHERE id=?", (time.time(), str(note or "")[:300], rid))
+            elif action == "declined":
+                db.execute("UPDATE rw_req SET status='declined', decided=?, note=? WHERE id=?", (time.time(), str(note or "")[:300], rid))
+                db.execute("INSERT INTO rw_ledger(pid,kind,units,note,created) VALUES(?,?,?,?,?)", (q["pid"], "refund", q["units"], "Refund: " + q["pname"], time.time()))
+                raw = {}
+                r = db.execute("SELECT v FROM settings WHERE k='rw'").fetchone()
+                if r:
+                    raw = json.loads(r["v"])
+                cur = next((x["s"] for x in self.rw_cfg(db)["prizes"] if x["id"] == q["prize"]), 0)
+                raw.setdefault("prizes", {}).setdefault(q["prize"], {})["s"] = cur + 1
+                db.execute("INSERT OR REPLACE INTO settings(k,v) VALUES('rw',?)", (json.dumps(raw),))
+            else:
+                db.execute("ROLLBACK")
+                return None, "Unknown action."
+            self.audit(db, who, "rewards_request_" + action, {"id": rid, "prize": q["pname"], "player": q["pid"]})
+            db.execute("COMMIT")
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+        return {"ok": True}, None
+
+    def admin_rw_cfg(self, body, who):
+        db = self.wdb()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            raw = {}
+            r = db.execute("SELECT v FROM settings WHERE k='rw'").fetchone()
+            if r:
+                raw = json.loads(r["v"])
+            if "on" in body:
+                raw["on"] = 1 if body["on"] else 0
+            pz = body.get("prizes")
+            if isinstance(pz, dict):
+                ids = {p["id"] for p in RW_PRIZES}
+                for k, v in pz.items():
+                    if k in ids and isinstance(v, dict):
+                        o = raw.setdefault("prizes", {}).setdefault(k, {})
+                        if "s" in v:
+                            o["s"] = max(0, min(9999, int(v["s"])))
+                        if "on" in v:
+                            o["on"] = 1 if v["on"] else 0
+            db.execute("INSERT OR REPLACE INTO settings(k,v) VALUES('rw',?)", (json.dumps(raw),))
+            self.audit(db, who, "rewards_config", body)
+            db.execute("COMMIT")
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+        return {"ok": True}, None
+
     def request_withdrawal(self, pid, coin_id, address, amount):
         db = self.wdb()
         try:
@@ -1836,7 +2089,7 @@ class Players:
                 if r["bname"] in bs:
                     bs[r["bname"]]["paid_cents"] = r["v"]
             aud = [dict(r) for r in db.execute("SELECT ts,who,action,detail FROM audit ORDER BY id DESC LIMIT 300")]
-            return {"players": pl, "deposits": dep, "withdrawals": wd, "orders": orders, "boxes": bs, "audit": aud}
+            return {"players": pl, "deposits": dep, "withdrawals": wd, "orders": orders, "boxes": bs, "audit": aud, "rewards": self.rw_admin(db)}
         finally:
             db.close()
 
@@ -2052,6 +2305,11 @@ class H(BaseHTTPRequestHandler):
             if not p:
                 return self.send(401, {"error": "sign in"})
             return self.send(200, app.players.fair_view(p["id"]) if self.path == "/api/fair" else app.players.items_view(p["id"]))
+        if self.path == "/api/rewards":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, app.players.rw_view(p["id"]))
         if self.path == "/api/wallet/nowpay/coins":
             p = app.players.session_player(self.pcookie_val())
             if not p:
@@ -2092,6 +2350,29 @@ class H(BaseHTTPRequestHandler):
                 return self.send(401, {"error": "bad signature"})
             code, txt = app.players.np_ipn(body)
             return self.send(code, {"ok": code == 200, "msg": txt})
+        if self.path in ("/api/rewards/redeem", "/api/rewards/cash"):
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            if not app.players.dep_lim.hit(p["id"]):
+                return self.send(429, {"error": "Too many requests. Please try again later."})
+            if self.path.endswith("redeem"):
+                r, err = app.players.rw_redeem(p["id"], str(body.get("id", ""))[:20])
+            else:
+                r, err = app.players.rw_cash(p["id"], body.get("units"))
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, {"ok": True, "rewards": app.players.rw_view(p["id"]), "wallet": app.players.wallet_view(p["id"])})
+        if self.path in ("/api/admin/rewards/req", "/api/admin/rewards/cfg"):
+            if not self.admin_ok():
+                return self.send(401, {"error": "sign in"})
+            if self.path.endswith("req"):
+                r, err = app.players.admin_rw_req(int(body.get("id") or 0), str(body.get("action", "")), body.get("note", ""), "admin")
+            else:
+                r, err = app.players.admin_rw_cfg(body, "admin")
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, {"ok": True})
         if self.path == "/api/wallet/nowpay/create":
             p = app.players.session_player(self.pcookie_val())
             if not p:
@@ -2118,7 +2399,7 @@ class H(BaseHTTPRequestHandler):
             ip = self.ip()
             if not app.players.signup_lim.hit(ip):
                 return self.send(429, {"error": "Too many new accounts from this connection. Please try again later."})
-            pid, err = app.players.signup(str(body.get("name", ""))[:40], str(body.get("email", ""))[:260], str(body.get("password", ""))[:300], body.get("state"))
+            pid, err = app.players.signup(str(body.get("name", ""))[:40], str(body.get("email", ""))[:260], str(body.get("password", ""))[:300], body.get("state"), str(body.get("ref", ""))[:20])
             if err:
                 return self.send(400, {"error": err})
             tok = app.players.new_session(pid)
