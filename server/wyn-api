@@ -114,6 +114,49 @@ def send_async(to, subject, text, html=None):
             sys.stderr.write("mail to a player failed: %s\n" % msg)
     threading.Thread(target=run, daemon=True).start()
 
+# ---------- crypto deposits through NOWPayments (optional: switched on by `wyn-nowpay-setup`) ----------
+NP_DIR = os.environ.get("WYN_NP_DIR", "/etc/wyn")
+NP_ENV = ["live"]
+NP_LABELS = {
+    "btc": ("Bitcoin", "Bitcoin"), "eth": ("Ethereum", "Ethereum"), "ltc": ("Litecoin", "Litecoin"), "doge": ("Dogecoin", "Dogecoin"),
+    "sol": ("Solana", "Solana"), "trx": ("Tron", "Tron"), "xrp": ("XRP", "XRP Ledger"), "bnbbsc": ("BNB", "BNB Smart Chain"),
+    "usdttrc20": ("Tether USDT", "Tron (TRC20)"), "usdterc20": ("Tether USDT", "Ethereum (ERC20)"), "usdtbsc": ("Tether USDT", "BNB Smart Chain"),
+    "usdtsol": ("Tether USDT", "Solana"), "usdtmatic": ("Tether USDT", "Polygon"), "usdtarb": ("Tether USDT", "Arbitrum"),
+    "usdcerc20": ("USD Coin", "Ethereum (ERC20)"), "usdcsol": ("USD Coin", "Solana"), "usdcmatic": ("USD Coin", "Polygon"), "usdcbsc": ("USD Coin", "BNB Smart Chain"),
+}
+
+def np_conf():
+    c = read_json(os.path.join(NP_DIR, "nowpay-%s.json" % NP_ENV[0]), None)
+    return c if isinstance(c, dict) and c.get("api_key") and c.get("ipn_secret") else None
+
+def np_base(c):
+    return os.environ.get("WYN_NP_URL") or ("https://api-sandbox.nowpayments.io/v1" if c.get("sandbox") else "https://api.nowpayments.io/v1")
+
+def np_call(method, path, body=None):
+    """One call to NOWPayments. Returns (json, error_text). Never raises."""
+    c = np_conf()
+    if not c:
+        return None, "Crypto deposits are not set up yet."
+    try:
+        req = urllib.request.Request(np_base(c) + path, data=(json.dumps(body).encode() if body is not None else None),
+                                     headers={"x-api-key": c["api_key"], "Content-Type": "application/json", "User-Agent": "wyn-api/1.0"}, method=method)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read() or b"{}"), None
+    except urllib.error.HTTPError as e:
+        try:
+            j = json.loads(e.read())
+            msg = str(j.get("message") or j.get("error") or "")
+        except Exception:
+            msg = ""
+        return None, "HTTP %d %s" % (e.code, msg[:200])
+    except Exception as e:
+        return None, str(e)[:200]
+
+def np_sign(payload, secret):
+    """NOWPayments signs the payload with all keys sorted, compact JSON, HMAC-SHA512."""
+    txt = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hmac.new(secret.encode(), txt.encode(), hashlib.sha512).hexdigest()
+
 def esc_html(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
@@ -269,6 +312,8 @@ class Players:
         CREATE INDEX IF NOT EXISTS dep_pid ON deposits(pid, id);
         CREATE TABLE IF NOT EXISTS withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, coin TEXT NOT NULL, network TEXT, address TEXT NOT NULL, cents INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', txid TEXT, created REAL NOT NULL, decided REAL, admin_note TEXT);
         CREATE INDEX IF NOT EXISTS wd_pid ON withdrawals(pid, id);
+        CREATE TABLE IF NOT EXISTS nowpay(id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, oid TEXT NOT NULL UNIQUE, npid TEXT, coin TEXT NOT NULL, cents INTEGER NOT NULL, addr TEXT, amt TEXT, extra TEXT, status TEXT NOT NULL DEFAULT 'waiting', created REAL NOT NULL, upd REAL, exp REAL);
+        CREATE INDEX IF NOT EXISTS np_pid ON nowpay(pid, id);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, who TEXT NOT NULL, action TEXT NOT NULL, detail TEXT);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS fair(pid INTEGER PRIMARY KEY, seed TEXT NOT NULL, cs TEXT NOT NULL, nonce INTEGER NOT NULL DEFAULT 0, last TEXT);
@@ -616,11 +661,12 @@ class Players:
             st = self.settings(db)
             p = db.execute("SELECT real_cents FROM players WHERE id=?", (pid,)).fetchone()
             coins = [{k: c.get(k) for k in ("id", "label", "network", "address", "addr_type")} for c in st["coins"] if c.get("enabled") and c.get("address")] if st["real_deposits"] or st["real_withdrawals"] else []
+            nps = [dict(r) for r in db.execute("SELECT oid,coin,cents,addr,amt,extra,status,created,exp FROM nowpay WHERE pid=? ORDER BY id DESC LIMIT 5", (pid,))]
             deps = [dict(r) for r in db.execute("SELECT id,coin,network,claimed_cents,txid,status,credited_cents,created,admin_note FROM deposits WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
             wds = [dict(r) for r in db.execute("SELECT id,coin,network,address,cents,status,txid,created,admin_note FROM withdrawals WHERE pid=? ORDER BY id DESC LIMIT 20", (pid,))]
             led = [dict(r) for r in db.execute("SELECT kind,cents,bal_after,note,created FROM wallet_ledger WHERE pid=? ORDER BY id DESC LIMIT 30", (pid,))]
             return {"real_cents": p["real_cents"], "config": {"real_deposits": bool(st["real_deposits"]), "real_withdrawals": bool(st["real_withdrawals"]),
-                    "min_deposit": st["min_deposit"], "min_withdraw": st["min_withdraw"], "coins": coins}, "deposits": deps, "withdrawals": wds, "ledger": led}
+                    "min_deposit": st["min_deposit"], "min_withdraw": st["min_withdraw"], "coins": coins, "nowpay": bool(np_conf() and st["real_deposits"])}, "nowpay": nps, "deposits": deps, "withdrawals": wds, "ledger": led}
         finally:
             db.close()
 
@@ -1362,6 +1408,115 @@ class Players:
         finally:
             db.close()
 
+    # ---------- NOWPayments deposits ----------
+    def np_coins(self):
+        now = time.time()
+        c = getattr(self, "_npc", None)
+        if c and now - c[0] < 600:
+            return c[1]
+        j, err = np_call("GET", "/merchant/coins")
+        if err or not isinstance(j, dict):
+            return c[1] if c else []
+        out = []
+        for code in j.get("selectedCurrencies") or []:
+            code = str(code).lower()
+            if re.match(r"^[a-z0-9]{2,20}$", code):
+                lab, net = NP_LABELS.get(code, (code.upper(), ""))
+                out.append({"id": code, "label": lab, "network": net})
+        self._npc = (now, out)
+        return out
+
+    def np_create(self, pid, code, amount):
+        st = self.settings()
+        if not st["real_deposits"]:
+            return None, "Real deposits are not open yet."
+        if not np_conf():
+            return None, "Crypto deposits are not set up yet."
+        code = str(code).lower()
+        coin = next((c for c in self.np_coins() if c["id"] == code), None)
+        if not coin:
+            return None, "Please choose a payment method."
+        cents = self.cents(amount)
+        if cents is None or cents < int(float(st["min_deposit"]) * 100):
+            return None, "The smallest deposit is $%g." % st["min_deposit"]
+        if cents > 5_000_000:
+            return None, "That is more than we can accept in one deposit. Please try a smaller amount."
+        db = self.wdb()
+        try:
+            n = db.execute("SELECT COUNT(*) FROM nowpay WHERE pid=? AND status='waiting' AND created>?", (pid, time.time() - 86400)).fetchone()[0]
+            if n >= 5:
+                return None, "You already have several open deposits. Please finish or wait for them to expire."
+            oid = "wyn-%s-%d-%s" % (NP_ENV[0], pid, secrets.token_hex(6))
+            j, err = np_call("POST", "/payment", {"price_amount": cents / 100.0, "price_currency": "usd", "pay_currency": code, "order_id": oid,
+                                                  "order_description": "wyn.fun deposit", "ipn_callback_url": base_url(NP_ENV[0]) + "/api/nowpay/ipn"})
+            if err or not isinstance(j, dict) or not j.get("pay_address") or not j.get("payment_id"):
+                sys.stderr.write("nowpayments create failed: %s\n" % (err or str(j)[:200]))
+                if err and ("400" in err or "amount" in err.lower()):
+                    return None, "That amount does not work for this coin. Try a larger amount or a different coin."
+                return None, "We could not create the deposit right now. Please try again in a minute."
+            exp = None
+            try:
+                from datetime import datetime
+                ed = str(j.get("expiration_estimate_date") or j.get("valid_until") or "")
+                if ed:
+                    exp = datetime.fromisoformat(ed.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                exp = None
+            exp = exp or time.time() + 6 * 3600
+            db.execute("INSERT INTO nowpay(pid,oid,npid,coin,cents,addr,amt,extra,status,created,upd,exp) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (pid, oid, str(j["payment_id"]), code, cents, str(j["pay_address"])[:200], str(j.get("pay_amount", ""))[:40], str(j.get("payin_extra_id") or "")[:60], "waiting", time.time(), time.time(), exp))
+            return {"ok": True}, None
+        finally:
+            db.close()
+
+    def np_ipn(self, p):
+        """Handles one signed callback. Returns (http_code, text). Credits the wallet at most once."""
+        oid = str(p.get("order_id", ""))
+        npid = str(p.get("payment_id", ""))
+        status = str(p.get("payment_status", "")).lower()
+        db = self.wdb()
+        try:
+            r = db.execute("SELECT * FROM nowpay WHERE oid=?", (oid,)).fetchone()
+            if not r or (r["npid"] and npid and r["npid"] != npid):
+                sys.stderr.write("nowpayments callback for an unknown order: %s\n" % oid[:60])
+                return 200, "ignored"
+            if r["status"] == "credited":
+                return 200, "already done"
+            if status == "finished":
+                j, err = np_call("GET", "/payment/%s" % r["npid"])
+                if err or not isinstance(j, dict) or str(j.get("payment_status", "")).lower() != "finished" or str(j.get("order_id", "")) != oid:
+                    sys.stderr.write("nowpayments could not confirm %s: %s\n" % (oid[:60], err or str(j)[:120]))
+                    return 503, "could not confirm, retry"
+                try:
+                    db.execute("BEGIN IMMEDIATE")
+                    r2 = db.execute("SELECT status FROM nowpay WHERE oid=?", (oid,)).fetchone()
+                    if r2["status"] == "credited":
+                        db.execute("ROLLBACK")
+                        return 200, "already done"
+                    db.execute("UPDATE nowpay SET status='credited', upd=? WHERE oid=?", (time.time(), oid))
+                    lab = NP_LABELS.get(r["coin"], (r["coin"].upper(), ""))[0]
+                    db.execute("INSERT INTO deposits(pid,coin,network,claimed_cents,txid,status,credited_cents,created,decided,admin_note) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                               (r["pid"], lab, NP_LABELS.get(r["coin"], ("", ""))[1], r["cents"], "np:" + r["npid"], "approved", r["cents"], r["created"], time.time(), "Automatic (NOWPayments)"))
+                    self._post(db, r["pid"], "deposit", r["cents"], "NP%s" % r["npid"], "Deposit %s" % lab)
+                    self.audit(db, "nowpayments", "deposit_credited", {"order": oid, "cents": r["cents"], "coin": r["coin"], "payment": r["npid"]})
+                    db.execute("COMMIT")
+                except Exception:
+                    try:
+                        db.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
+                return 200, "credited"
+            m = {"partially_paid": "partial", "failed": "failed", "expired": "expired", "refunded": "failed",
+                 "waiting": "waiting", "confirming": "confirming", "confirmed": "confirming", "sending": "confirming"}.get(status)
+            if m:
+                db.execute("UPDATE nowpay SET status=?, upd=? WHERE oid=? AND status<>'credited'", (m, time.time(), oid))
+                if m == "partial":
+                    self.audit(db, "nowpayments", "deposit_partial", {"order": oid, "expected_cents": r["cents"], "paid": str(p.get("actually_paid", ""))[:30], "coin": r["coin"], "payment": r["npid"]})
+            return 200, "ok"
+        finally:
+            db.close()
+
     def request_withdrawal(self, pid, coin_id, address, amount):
         db = self.wdb()
         try:
@@ -1840,6 +1995,11 @@ class H(BaseHTTPRequestHandler):
             if not p:
                 return self.send(401, {"error": "sign in"})
             return self.send(200, app.players.fair_view(p["id"]) if self.path == "/api/fair" else app.players.items_view(p["id"]))
+        if self.path == "/api/wallet/nowpay/coins":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            return self.send(200, {"coins": app.players.np_coins() if np_conf() else []})
         if self.path == "/api/wallet":
             p = app.players.session_player(self.pcookie_val())
             if not p:
@@ -1868,6 +2028,23 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(min(n, 450 * 1024)) or b"{}")
         except Exception:
             return self.send(400, {"error": "bad request"})
+        if self.path == "/api/nowpay/ipn":
+            c = np_conf()
+            sig = (self.headers.get("x-nowpayments-sig") or "").strip().lower()
+            if not c or not isinstance(body, dict) or not hmac.compare_digest(np_sign(body, c["ipn_secret"]), sig):
+                return self.send(401, {"error": "bad signature"})
+            code, txt = app.players.np_ipn(body)
+            return self.send(code, {"ok": code == 200, "msg": txt})
+        if self.path == "/api/wallet/nowpay/create":
+            p = app.players.session_player(self.pcookie_val())
+            if not p:
+                return self.send(401, {"error": "sign in"})
+            if not app.players.dep_lim.hit(p["id"]):
+                return self.send(429, {"error": "Too many requests. Please try again later."})
+            ok, err = app.players.np_create(p["id"], str(body.get("coin", ""))[:30], body.get("amount"))
+            if err:
+                return self.send(400, {"error": err})
+            return self.send(200, {"ok": True, "wallet": app.players.wallet_view(p["id"])})
         if self.path == "/api/admin/login":
             ip = self.ip()
             if app.guard.blocked(ip):
@@ -2076,6 +2253,7 @@ class H(BaseHTTPRequestHandler):
 
 
 def serve(env):
+    NP_ENV[0] = env
     port = int(os.environ.get("WYN_PORT") or PORTS[env])
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     srv.app = App(env)
@@ -2144,12 +2322,43 @@ def mail_setup():
     print("\nDone. Password reset and welcome emails are now switched on.\n")
 
 
+def nowpay_setup(env):
+    print("\nNOWPayments setup for %s.\n" % env)
+    key = getpass.getpass("Paste your NOWPayments API key (nothing shows while you paste): ").strip()
+    sec = getpass.getpass("Paste your NOWPayments IPN secret key (nothing shows while you paste): ").strip()
+    sb = input("Is this a SANDBOX (test) account? [y/N]: ").strip().lower().startswith("y")
+    if not key or not sec:
+        print("Both keys are needed. Nothing was saved.")
+        return
+    os.makedirs(NP_DIR, exist_ok=True)
+    f = os.path.join(NP_DIR, "nowpay-%s.json" % env)
+    write_json(f, {"api_key": key, "ipn_secret": sec, "sandbox": sb}, 0o640)
+    try:
+        import grp
+        os.chown(f, 0, grp.getgrnam("wynapi").gr_gid)
+    except Exception:
+        pass
+    NP_ENV[0] = env
+    j, err = np_call("GET", "/status")
+    print("\nConnection test:", "OK" if not err else "FAILED: " + err)
+    if not err:
+        j2, err2 = np_call("GET", "/merchant/coins")
+        if err2:
+            print("Could not read your coin list: " + err2)
+        else:
+            print("Coins switched on in your NOWPayments account:", ", ".join(j2.get("selectedCurrencies") or []) or "none yet")
+    print("\nIPN callback address to set in NOWPayments:  %s/api/nowpay/ipn" % base_url(env))
+    print("Restart to apply:  systemctl restart wyn-api@%s\n" % env)
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if len(a) == 2 and a[0] == "serve" and a[1] in PORTS:
         serve(a[1])
     elif len(a) == 2 and a[0] == "setup" and a[1] in ("live", "staging", "both"):
         setup(a[1])
+    elif len(a) == 2 and a[0] == "nowpay-setup" and a[1] in ("live", "staging"):
+        nowpay_setup(a[1])
     elif len(a) == 1 and a[0] == "mail-setup":
         mail_setup()
     else:

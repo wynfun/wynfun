@@ -37,6 +37,9 @@ staging.__DOMAIN__ {
 		Cache-Control "no-store"
 		-Server
 	}
+	handle /api/nowpay/ipn {
+		reverse_proxy 127.0.0.1:8082
+	}
 	handle /api/* {
 		basic_auth {
 			staging __HASH__

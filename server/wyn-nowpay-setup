@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Connect NOWPayments crypto deposits:   wyn-nowpay-setup staging   (test first)
+#                                         wyn-nowpay-setup live
+exec /usr/local/bin/wyn-api nowpay-setup "${1:?Use: wyn-nowpay-setup staging   or   wyn-nowpay-setup live}"
