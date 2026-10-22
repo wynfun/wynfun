@@ -56,6 +56,7 @@ install -d -m 700 -o wynapi -g wynapi /var/lib/wyn /var/lib/wyn/live /var/lib/wy
 install -m 755 "$SRC/wyn-api" /usr/local/bin/wyn-api
 install -m 755 "$SRC/wyn-admin-setup" /usr/local/bin/wyn-admin-setup
 install -m 755 "$SRC/wyn-mail-setup" /usr/local/bin/wyn-mail-setup
+install -m 755 "$SRC/wyn-nowpay-setup" /usr/local/bin/wyn-nowpay-setup
 install -d -m 750 -o root -g wynapi /etc/wyn
 install -m 644 "$SRC/wyn-api@.service" /etc/systemd/system/wyn-api@.service
 systemctl daemon-reload
